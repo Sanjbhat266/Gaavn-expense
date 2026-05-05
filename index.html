@@ -271,8 +271,13 @@ datalist{display:none;}
     <div class="form-group">
       <label class="form-label">Party Name *</label>
       <div style="position:relative;">
-        <input type="text" class="form-input" id="exp-party" list="party-list" placeholder="Type or select party..." autocomplete="off" oninput="onPartyInput(this.value)">
-        <datalist id="party-list"></datalist>
+        <div style="position:relative;">
+          <input type="text" class="form-input" id="exp-party" placeholder="Tap to search party..." autocomplete="off"
+            oninput="onPartyInput(this.value)"
+            onfocus="showPartyDropdown(this.value)"
+            onblur="setTimeout(hidePartyDropdown,200)">
+          <div id="party-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid var(--amber);border-radius:0 0 10px 10px;z-index:400;max-height:200px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,0.12);"></div>
+        </div>
         <button id="btn-add-party" onclick="showAddPartyInline()" style="display:none;position:absolute;right:8px;top:50%;transform:translateY(-50%);background:var(--amber);color:#fff;border:none;border-radius:6px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;">+ Add</button>
       </div>
       <div id="party-detail-chip" style="display:none;margin-top:6px;background:var(--al);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--amber);align-items:center;justify-content:space-between;"></div>
@@ -773,9 +778,15 @@ function saveExpense(){
       localStorage.setItem(LS_PARTIES,JSON.stringify(S.parties));
     }
   }
-  if(item){
+  if(item && category){
+    // Only save item if not already in the list (avoids duplicate from modal add)
     if(!S.items[category])S.items[category]=[];
-    if(S.items[category].indexOf(item)<0){S.items[category].push(item);localStorage.setItem(LS_ITEMS,JSON.stringify(S.items));}
+    var alreadySaved=S.items[category].some(function(i){return i.toLowerCase()===item.toLowerCase();});
+    if(!alreadySaved){
+      S.items[category].push(item);
+      S.items[category].sort();
+      localStorage.setItem(LS_ITEMS,JSON.stringify(S.items));
+    }
   }
   var editId=document.getElementById('exp-edit-id').value;
   var obj={
@@ -879,18 +890,16 @@ function onCategoryChange(){
 
 function populateCatDropdown(){
   var opts=S.cats.map(function(c){return '<option value="'+c+'">'+c+'</option>';}).join('');
+  // Preserve current selections before rebuilding innerHTML
   var sel=document.getElementById('exp-category');
-  if(sel)sel.innerHTML='<option value="">Select category...</option>'+opts;
+  if(sel){var prev=sel.value;sel.innerHTML='<option value="">Select category...</option>'+opts;if(prev)sel.value=prev;}
   var r=document.getElementById('rpt-cat');
-  if(r)r.innerHTML='<option value="">All Categories</option>'+opts;
-  // Item modal category select
+  if(r){var prevR=r.value;r.innerHTML='<option value="">All Categories</option>'+opts;if(prevR)r.value=prevR;}
   var ic=document.getElementById('new-item-cat');
-  if(ic)ic.innerHTML='<option value="">Select category...</option>'+opts;
-  // Settings item category filter
+  if(ic){var prevI=ic.value;ic.innerHTML='<option value="">Select category...</option>'+opts;if(prevI)ic.value=prevI;}
   var sf=document.getElementById('settings-item-cat-filter');
-  if(sf)sf.innerHTML='<option value="">All Categories</option>'+opts;
+  if(sf){var prevS=sf.value;sf.innerHTML='<option value="">All Categories</option>'+opts;if(prevS)sf.value=prevS;}
 }
-
 function populatePMDropdown(){
   var sel=document.getElementById('exp-paymethod');
   sel.innerHTML='<option value="">Select payment method...</option>'+S.pm.map(function(p){return '<option value="'+p.id+'">'+(PICONS[p.type]||'')+'&nbsp;'+p.name+'</option>';}).join('');
@@ -899,14 +908,48 @@ function populatePMDropdown(){
 }
 
 function populatePartyDL(){
-  var dl=document.getElementById('party-list');
-  if(dl)dl.innerHTML=S.parties.map(function(p){return '<option value="'+p.name+'">';}).join('');
+  // Legacy — now using custom dropdown, nothing needed here
+}
+
+function showPartyDropdown(val){
+  var dd=document.getElementById('party-dropdown');
+  if(!dd) return;
+  var filter=(val||'').toLowerCase();
+  var matches=S.parties.filter(function(p){
+    return !filter || p.name.toLowerCase().indexOf(filter)>=0;
+  });
+  if(!matches.length){dd.style.display='none';return;}
+  dd.innerHTML=matches.map(function(p){
+    var details=[];
+    if(p.gst) details.push(p.gst);
+    if(p.phone) details.push(p.phone);
+    return '<div data-name="'+p.name.replace(/"/g,'&quot;')+'" onmousedown="selectParty(this)" ontouchend="selectParty(this)"'
+      +' style="padding:10px 14px;cursor:pointer;border-bottom:1px solid #f0f0f0;font-size:13px;">'
+      +'<div style="font-weight:700;">'+p.name+'</div>'
+      +(details.length?'<div style="font-size:11px;color:#888;">'+details.join(' · ')+'</div>':'')
+      +'</div>';
+  }).join('');
+  dd.style.display='block';
+}
+
+function hidePartyDropdown(){
+  var dd=document.getElementById('party-dropdown');
+  if(dd) dd.style.display='none';
+}
+
+function selectParty(el){
+  var name=el.dataset.name;
+  document.getElementById('exp-party').value=name;
+  onPartyInput(name);
+  hidePartyDropdown();
 }
 
 function onPartyInput(val){
   var trimmed=val.trim();
   var btn=document.getElementById('btn-add-party');
   var chip=document.getElementById('party-detail-chip');
+  // Refresh dropdown as user types
+  showPartyDropdown(trimmed);
   if(!trimmed){if(btn)btn.style.display='none';if(chip)chip.style.display='none';return;}
   var match=S.parties.find(function(p){return p.name.toLowerCase()===trimmed.toLowerCase();});
   if(match){
@@ -1035,14 +1078,22 @@ function saveNewItem(){
     S.items[cat].push(name);S.items[cat].sort();
     localStorage.setItem(LS_ITEMS,JSON.stringify(S.items));
     // If called from expense form context, update the item input
-    var expCat=document.getElementById('exp-category').value;
-    if(expCat===cat){
+    var expCatEl=document.getElementById('exp-category');
+    var expCat=expCatEl?expCatEl.value:'';
+    // renderSettings calls populateCatDropdown which resets dropdowns,
+    // so save and restore exp-category value around it
+    var savedCat=expCatEl?expCatEl.value:'';
+    renderItemsList();renderSettings();
+    // Restore category after renderSettings resets it
+    if(expCatEl && savedCat) expCatEl.value=savedCat;
+    if(expCat===cat || !expCat){
+      // Set category if not already set
+      if(expCatEl && !expCatEl.value && cat) expCatEl.value=cat;
       document.getElementById('exp-item').value=name;
       onCategoryChange();
       var btn=document.getElementById('btn-add-item');
       if(btn)btn.style.display='none';
     }
-    renderItemsList();renderSettings();
     closeModal('modal-add-item');showToast('Item added: '+name);
   }
 }
