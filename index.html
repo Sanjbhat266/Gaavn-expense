@@ -181,11 +181,18 @@ datalist{display:none;}
       <input type="date" class="form-input" id="rpt-to">
     </div>
     <div class="form-row" style="margin-bottom:10px;">
-      <select class="form-input" id="rpt-cat" onchange="renderReports()"><option value="">All Categories</option></select>
+      <select class="form-input" id="rpt-cat" onchange="onRptCatChange()"><option value="">All Categories</option></select>
       <select class="form-input" id="rpt-pay" onchange="renderReports()"><option value="">All Payment Types</option></select>
     </div>
-    <input type="text" class="form-input" id="rpt-party" placeholder="Search party..." oninput="renderReports()" style="margin-bottom:10px;">
-    <button class="btn btn-secondary btn-sm" onclick="exportToSheet()" style="margin-bottom:14px;">Export to Sheet</button>
+    <div class="form-row" style="margin-bottom:10px;">
+      <input type="text" class="form-input" id="rpt-party" placeholder="Search party..." oninput="renderReports()">
+      <input type="text" class="form-input" id="rpt-item" placeholder="Search item..." oninput="renderReports()">
+    </div>
+    <input type="date" class="form-input" id="rpt-single-day" placeholder="Filter single day..." oninput="onRptSingleDay()" style="margin-bottom:10px;">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+      <button class="btn btn-secondary btn-sm" onclick="exportToSheet()">Export to Sheet</button>
+      <button class="btn btn-secondary btn-sm" onclick="clearRptFilters()">Clear Filters</button>
+    </div>
     <div id="report-content"></div>
   </div>
 
@@ -479,7 +486,10 @@ datalist{display:none;}
   <div class="modal-sheet">
     <div class="modal-handle"></div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-      <div class="modal-title">Add Party</div>
+      <div class="modal-title" id="modal-add-party-title">Add Party</div>
+    <div id="modal-party-rename-row" style="display:none;margin-bottom:12px;background:var(--al);border-radius:8px;padding:8px 12px;font-size:12px;color:var(--amber);">
+      ✏ Editing existing party — changes to name will update all expenses
+    </div>
       <button onclick="closeModal('modal-add-party')" style="background:none;border:none;font-size:22px;cursor:pointer;">&#10005;</button>
     </div>
     <div class="form-group">
@@ -832,7 +842,9 @@ function viewExpense(id){
   var html='<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">';
   var partyObj=S.parties.find(function(p){return p.name===e.party;});
   var partyDisplay=e.party+(partyObj&&partyObj.gst?' <span style="font-size:11px;color:var(--blue);">GST: '+partyObj.gst+'</span>':'');
-  html+=fi('Party',partyDisplay)+fi('Date',fmtDate(e.date))+fi('Category',e.category)+fi('Item',e.item||'—')+fi('State',e.state||'—')+fi('Payment',pm?pm.name:'—');
+  var editPartyBtn=canEdit?'<button onclick="showEditPartyName(''+e.id+'')" style="background:none;border:none;color:var(--amber);font-size:11px;font-weight:700;cursor:pointer;padding:2px 6px;border-radius:4px;border:1px solid var(--amber);margin-left:6px;">&#9998; Edit Name</button>':'';
+  var partyWithEdit=partyDisplay+editPartyBtn;
+  html+=fi('Party',partyWithEdit)+fi('Date',fmtDate(e.date))+fi('Category',e.category)+fi('Item',e.item||'—')+fi('State',e.state||'—')+fi('Payment',pm?pm.name:'—');
   html+='</div>';
   html+='<div style="background:var(--al);border-radius:10px;padding:12px;margin-bottom:12px;"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;text-align:center;">';
   html+='<div><div style="font-size:11px;color:var(--muted);">Total</div><div style="font-weight:700;font-size:16px;">'+fmtM(e.total)+'</div></div>';
@@ -992,13 +1004,21 @@ function saveNewParty(){
   if(editId){
     // Edit existing
     var p=S.parties.find(function(x){return x.id===editId;});
+    var oldName2=document.getElementById('new-party-name').dataset.oldName||'';
     if(p){Object.assign(p,{name:name,gst:gst,address:address,phone:phone,email:email,contact:contact});}
     delete document.getElementById('new-party-name').dataset.editId;
+    delete document.getElementById('new-party-name').dataset.oldName;
+    // If name changed, update all expenses that reference the old name
+    if(oldName2 && oldName2!==name){
+      var renamed=0;
+      S.expenses.forEach(function(e){if(e.party===oldName2){e.party=name;renamed++;}});
+      if(renamed>0){localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));renderDashboard();}
+    }
     S.parties.sort(function(a,b){return a.name.localeCompare(b.name);});
     localStorage.setItem(LS_PARTIES,JSON.stringify(S.parties));
     document.getElementById('exp-party').value=name;
     populatePartyDL();onPartyInput(name);
-    closeModal('modal-add-party');showToast('Party updated');
+    closeModal('modal-add-party');showToast('Party updated'+(oldName2&&oldName2!==name?' — renamed in all expenses':''));
   } else {
     var existing=S.parties.find(function(p){return p.name.toLowerCase()===name.toLowerCase();});
     if(existing){showToast('Party already exists');return;}
@@ -1021,8 +1041,12 @@ function editParty(id){
   document.getElementById('new-party-phone').value=p.phone||'';
   document.getElementById('new-party-email').value=p.email||'';
   document.getElementById('new-party-contact').value=p.contact||'';
-  // Store edit id
   document.getElementById('new-party-name').dataset.editId=id;
+  document.getElementById('new-party-name').dataset.oldName=p.name;
+  var t=document.getElementById('modal-add-party-title');
+  if(t)t.textContent='Edit Party';
+  var rr=document.getElementById('modal-party-rename-row');
+  if(rr)rr.style.display='block';
   openModal('modal-add-party');
 }
 
@@ -1206,6 +1230,11 @@ function showAddPartyFromSettings(){
   document.getElementById('new-party-email').value='';
   document.getElementById('new-party-contact').value='';
   delete document.getElementById('new-party-name').dataset.editId;
+  delete document.getElementById('new-party-name').dataset.oldName;
+  var t=document.getElementById('modal-add-party-title');
+  if(t)t.textContent='Add Party';
+  var rr=document.getElementById('modal-party-rename-row');
+  if(rr)rr.style.display='none';
   openModal('modal-add-party');
 }
 
@@ -1279,12 +1308,15 @@ function getRptExps(){
   var cat=document.getElementById('rpt-cat').value;
   var pay=document.getElementById('rpt-pay').value;
   var party=(document.getElementById('rpt-party').value||'').toLowerCase();
+  var item=(document.getElementById('rpt-item')?document.getElementById('rpt-item').value||'':'').toLowerCase();
+  var single=document.getElementById('rpt-single-day')?document.getElementById('rpt-single-day').value||'':'';
   return S.expenses.filter(function(e){
-    if(from&&e.date<from)return false;
-    if(to&&e.date>to)return false;
+    if(single){if(e.date!==single)return false;}
+    else{if(from&&e.date<from)return false;if(to&&e.date>to)return false;}
     if(cat&&e.category!==cat)return false;
     if(pay&&e.payMethodId!==pay)return false;
     if(party&&!(e.party||'').toLowerCase().includes(party))return false;
+    if(item&&!(e.item||'').toLowerCase().includes(item))return false;
     return true;
   });
 }
@@ -1385,6 +1417,65 @@ function getAppsScript(){
 
 function openModal(id){document.getElementById(id).classList.add('open');}
 function closeModal(id){document.getElementById(id).classList.remove('open');}
+
+// ── Report filter helpers ─────────────────────────────────────────────
+function onRptCatChange(){
+  // When category changes, repopulate item suggestions and re-render
+  renderReports();
+}
+function onRptSingleDay(){
+  // Single-day filter overrides date range
+  renderReports();
+}
+function clearRptFilters(){
+  document.getElementById('rpt-from').value=monthStart();
+  document.getElementById('rpt-to').value=todayStr();
+  document.getElementById('rpt-cat').value='';
+  document.getElementById('rpt-pay').value='';
+  document.getElementById('rpt-party').value='';
+  document.getElementById('rpt-item').value='';
+  document.getElementById('rpt-single-day').value='';
+  renderReports();
+}
+
+// ── Edit party name directly on an expense ────────────────────────────
+function showEditPartyName(expId){
+  var e=S.expenses.find(function(x){return x.id===expId;});
+  if(!e)return;
+  var oldName=e.party;
+  var newName=prompt('Edit party name:',oldName);
+  if(newName===null)return;
+  newName=newName.trim();
+  if(!newName){showToast('Name cannot be empty');return;}
+  if(newName===oldName){closeModal('modal-view-exp');return;}
+  // Count how many expenses share this party name
+  var count=S.expenses.filter(function(x){return x.party===oldName;}).length;
+  if(count>1){
+    var doAll=confirm('Rename "'+oldName+'" to "'+newName+'" in all '+count+' expenses? (OK = all, Cancel = only this one)');
+    if(doAll){bulkRenameParty(oldName,newName);closeModal('modal-view-exp');return;}
+  }
+  // Just update this one expense
+  e.party=newName;
+  localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
+  closeModal('modal-view-exp');
+  renderDashboard();
+  showToast('Party name updated');
+}
+
+// Bulk rename party across all expenses ─────────────────────────────
+function bulkRenameParty(oldName, newName){
+  var count=0;
+  S.expenses.forEach(function(e){
+    if(e.party===oldName){e.party=newName;count++;}
+  });
+  // Also update in parties list
+  var p=S.parties.find(function(x){return x.name===oldName;});
+  if(p)p.name=newName;
+  localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
+  localStorage.setItem(LS_PARTIES,JSON.stringify(S.parties));
+  renderDashboard();renderSettings();
+  showToast('Renamed in '+count+' expense(s)');
+}
 
 var _tt;
 function showToast(msg){
