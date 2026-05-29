@@ -622,6 +622,10 @@ function enterApp(role){
   showOnlyScreen('app-screen');
   populateCatDropdown();populatePMDropdown();populatePartyDL();populateRptFilters();
   renderDashboard();renderSettings();
+  // Ensure the dashboard tab is visible — switchTab sets inline style.display
+  // on inner screens which showOnlyScreen doesn't handle (it only toggles .active
+  // on top-level .screen elements). Without this, all inner tab screens are hidden.
+  switchTab('dashboard');
 }
 function logout(){S.role=null;showOnlyScreen('role-screen');buildRoleScreen();}
 
