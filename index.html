@@ -842,7 +842,7 @@ function viewExpense(id){
   var html='<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">';
   var partyObj=S.parties.find(function(p){return p.name===e.party;});
   var partyDisplay=e.party+(partyObj&&partyObj.gst?' <span style="font-size:11px;color:var(--blue);">GST: '+partyObj.gst+'</span>':'');
-  var editPartyBtn=canEdit?'<button onclick="showEditPartyName(''+e.id+'')" style="background:none;border:none;color:var(--amber);font-size:11px;font-weight:700;cursor:pointer;padding:2px 6px;border-radius:4px;border:1px solid var(--amber);margin-left:6px;">&#9998; Edit Name</button>':'';
+  var editPartyBtn=canEdit?'<button onclick="showEditPartyName(&quot;'+e.id+'&quot;)" style="background:none;border:none;color:var(--amber);font-size:11px;font-weight:700;cursor:pointer;padding:2px 6px;border-radius:4px;border:1px solid var(--amber);margin-left:6px;">&#9998; Edit Name</button>':'';
   var partyWithEdit=partyDisplay+editPartyBtn;
   html+=fi('Party',partyWithEdit)+fi('Date',fmtDate(e.date))+fi('Category',e.category)+fi('Item',e.item||'—')+fi('State',e.state||'—')+fi('Payment',pm?pm.name:'—');
   html+='</div>';
