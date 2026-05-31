@@ -190,8 +190,9 @@ datalist{display:none;}
     </div>
     <input type="date" class="form-input" id="rpt-single-day" placeholder="Filter single day..." oninput="onRptSingleDay()" style="margin-bottom:10px;">
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
-      <button class="btn btn-secondary btn-sm" onclick="exportToSheet()">Export to Sheet</button>
+      <button class="btn btn-primary btn-sm" onclick="downloadExcel()" style="background:var(--green);color:#fff;">&#8595; Download Excel</button>
       <button class="btn btn-secondary btn-sm" onclick="clearRptFilters()">Clear Filters</button>
+      <button class="btn btn-secondary btn-sm" onclick="deduplicateExpenses()" style="border-color:#FF5722;color:#FF5722;">&#10003; Remove Duplicates</button>
     </div>
     <div id="report-content"></div>
   </div>
@@ -762,7 +763,14 @@ function showEditExpense(id){
   openModal('modal-expense');
 }
 
+var _savingExpense = false; // submit lock — prevents double-tap duplicates
+
 function saveExpense(){
+  // ── Submit lock: ignore if already saving ──────────────────────────
+  if(_savingExpense){showToast('Already saving…');return;}
+  _savingExpense=true;
+  setTimeout(function(){_savingExpense=false;},3000); // release after 3s
+
   var party=document.getElementById('exp-party').value.trim();
   var category=document.getElementById('exp-category').value;
   var item=document.getElementById('exp-item').value.trim();
@@ -779,10 +787,30 @@ function saveExpense(){
   var gstRate=parseInt(document.getElementById('gst-rate').value)||18;
   var gstAmt=parseFloat(document.getElementById('gst-amount-display').value)||0;
   var baseAmt=parseFloat(document.getElementById('base-amount-display').value)||0;
-  if(!party){showToast('Enter party name');return;}
-  if(!category){showToast('Select a category');return;}
-  if(!date){showToast('Select a date');return;}
-  if(!total){showToast('Enter total amount');return;}
+  if(!party){_savingExpense=false;showToast('Enter party name');return;}
+  if(!category){_savingExpense=false;showToast('Select a category');return;}
+  if(!date){_savingExpense=false;showToast('Select a date');return;}
+  if(!total){_savingExpense=false;showToast('Enter total amount');return;}
+
+  // ── Duplicate detection ────────────────────────────────────────────
+  // Only check for NEW expenses (not edits)
+  var editId=document.getElementById('exp-edit-id').value;
+  if(!editId){
+    var possibleDups=S.expenses.filter(function(e){
+      return e.date===date
+        && e.party.toLowerCase()===party.toLowerCase()
+        && e.total===total
+        && e.category===category;
+    });
+    if(possibleDups.length>0){
+      var dupInfo=possibleDups[0];
+      var itemMatch=!item||!dupInfo.item||dupInfo.item.toLowerCase()===item.toLowerCase();
+      if(itemMatch){
+        var proceed=confirm('Possible duplicate detected!\n\nA similar expense already exists:\n  Party: '+dupInfo.party+'\n  Amount: Rs '+dupInfo.total+'\n  Category: '+dupInfo.category+(dupInfo.item?' / '+dupInfo.item:'')+' \n  Date: '+dupInfo.date+'\n\nSave anyway?');
+        if(!proceed){_savingExpense=false;return;}
+      }
+    }
+  }
   // Auto-save party as simple object if not already present
   if(party){
     var existingP=S.parties.find(function(p){return p.name.toLowerCase()===party.toLowerCase();});
@@ -825,7 +853,8 @@ function saveExpense(){
   if(S.url)syncToSheet(obj);
   closeModal('modal-expense');
   renderDashboard();
-  showToast(editId?'Updated':'Expense saved');
+  _savingExpense=false; // release lock
+  showToast(editId?'Updated':'Expense saved ✓');
 }
 
 function deleteExpense(id){
@@ -1363,10 +1392,19 @@ function renderReports(){
     html+='</div>';
   }
   html+='<div class="report-section"><div class="report-title">Transactions ('+exps.length+')</div>';
+  // Build duplicate map: key = date+party+amount+category; count > 1 = duplicate
+  var dupMap={};
+  exps.forEach(function(e){
+    var k=e.date+'|'+e.party.toLowerCase()+'|'+e.total+'|'+e.category;
+    dupMap[k]=(dupMap[k]||0)+1;
+  });
   exps.slice().sort(function(a,b){return b.date.localeCompare(a.date);}).forEach(function(e){
     var pm=S.pm.find(function(p){return p.id===e.payMethodId;});
-    html+='<div class="report-row" onclick="viewExpense(\''+e.id+'\')" style="cursor:pointer;flex-direction:column;align-items:flex-start;gap:2px;">'+
-      '<div style="display:flex;justify-content:space-between;width:100%;"><b>'+e.party+'</b><span class="report-val">'+fmtM(e.total)+'</span></div>'+
+    var k=e.date+'|'+e.party.toLowerCase()+'|'+e.total+'|'+e.category;
+    var isDup=dupMap[k]>1;
+    var dupBadge=isDup?'<span style="background:#FF5722;color:#fff;font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;margin-left:6px;">DUP</span>':'';
+    html+='<div class="report-row" onclick="viewExpense(\''+e.id+'\')" style="cursor:pointer;flex-direction:column;align-items:flex-start;gap:2px;'+(isDup?'background:#FFF3E0;border-left:3px solid #FF5722;':'')+'">'+
+      '<div style="display:flex;justify-content:space-between;width:100%;"><b>'+e.party+dupBadge+'</b><span class="report-val">'+fmtM(e.total)+'</span></div>'+
       '<div style="font-size:11px;color:var(--muted);">'+fmtDate(e.date)+'&nbsp;&middot;&nbsp;'+e.category+(e.item?'&nbsp;&middot;&nbsp;'+e.item:'')+(pm?'&nbsp;&middot;&nbsp;'+pm.name:'')+'</div>'+
     '</div>';
   });
@@ -1395,6 +1433,61 @@ async function exportToSheet(){
   var exps=getRptExps();showToast('Exporting '+exps.length+' records...');
   for(var i=0;i<exps.length;i++)await syncToSheet(exps[i]);
   showToast('Exported '+exps.length+' records');
+}
+
+function downloadExcel(){
+  var exps=getRptExps();
+  if(!exps.length){showToast('No records to download');return;}
+  // Build CSV with BOM for Excel to recognise UTF-8 (Rs symbol etc)
+  var BOM='﻿';
+  var headers=['ID','Date','Party','Category','Item','State','Total','Paid','Balance',
+    'GST Mode','GST Rate','GST Amt','Base Amt','Payment','Ref','Description'];
+  var rows=[headers.join(',')];
+  exps.forEach(function(e){
+    var pm=S.pm.find(function(p){return p.id===e.payMethodId;});
+    function esc(v){v=String(v==null?'':v);if(v.indexOf(',')>=0||v.indexOf('"')>=0||v.indexOf('\n')>=0)v='"'+v.replace(/"/g,'""')+'"';return v;}
+    rows.push([
+      esc(e.id),esc(e.date),esc(e.party),esc(e.category),esc(e.item||''),
+      esc(e.state||''),esc(e.total||0),esc(e.paid||0),esc(e.balance||0),
+      esc(e.gstMode||'none'),esc(e.gstRate||''),esc(e.gstAmount||0),esc(e.baseAmount||0),
+      esc(pm?pm.name:''),esc(e.ref||''),esc(e.desc||'')
+    ].join(','));
+  });
+  var csv=BOM+rows.join('\n');
+  var blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  // File name: GaavnExpenses_May2026.csv etc
+  var from=document.getElementById('rpt-from').value||'';
+  var to=document.getElementById('rpt-to').value||'';
+  var label=from&&to?(from+'_to_'+to):'all';
+  a.href=url;a.download='GaavnExpenses_'+label+'.csv';
+  document.body.appendChild(a);a.click();
+  setTimeout(function(){document.body.removeChild(a);URL.revokeObjectURL(url);},1000);
+  showToast('Downloaded '+exps.length+' records as CSV (open in Excel)');
+}
+
+function deduplicateExpenses(){
+  var before=S.expenses.length;
+  var seen={};
+  var deduped=[];
+  S.expenses.forEach(function(e){
+    // Key: date + party (lowercase) + total + category
+    var k=e.date+'|'+(e.party||'').toLowerCase()+'|'+e.total+'|'+e.category;
+    if(!seen[k]){
+      seen[k]=true;
+      deduped.push(e);
+    }
+  });
+  var removed=before-deduped.length;
+  if(removed===0){showToast('No duplicates found');return;}
+  var ok=confirm('Found '+removed+' duplicate expense(s).\nRemove them now?\n\n(Keeps the first entry of each duplicate group)');
+  if(!ok)return;
+  S.expenses=deduped;
+  localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
+  renderDashboard();
+  renderReports();
+  showToast('Removed '+removed+' duplicate(s). Total corrected.');
 }
 
 function showAppsScript(){
