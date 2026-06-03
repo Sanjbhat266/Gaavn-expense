@@ -14,6 +14,11 @@ body{font-family:'DM Sans',sans-serif;background:var(--cream);color:var(--ink);m
 .screen{display:none;min-height:100vh;flex-direction:column;}
 .screen.active{display:flex;}
 #role-screen{align-items:center;justify-content:center;padding:32px 20px;background:var(--ink);}
+/* Desktop: constrain app to phone-width, centre it */
+@media(min-width:600px){
+  #app-screen{max-width:480px;margin:0 auto;min-height:100vh;box-shadow:0 0 40px rgba(0,0,0,0.15);position:relative;}
+  #screen-dashboard,#screen-reports,#screen-settings{max-height:calc(100vh - 116px);overflow-y:auto;}
+}
 .role-logo{font-family:'DM Serif Display',serif;font-size:32px;color:var(--cream);text-align:center;margin-bottom:4px;}
 .role-sub{font-size:13px;color:var(--muted);text-align:center;margin-bottom:40px;letter-spacing:1px;text-transform:uppercase;}
 .role-cards{display:flex;flex-direction:column;gap:12px;width:100%;max-width:340px;}
@@ -174,7 +179,7 @@ datalist{display:none;}
     <div id="dash-expenses"></div>
   </div>
 
-  <div class="screen main" id="screen-reports" style="display:none;">
+  <div class="screen main" id="screen-reports" style="display:none;overflow-y:auto;">
     <div class="section-hdr">Filter Reports</div>
     <div class="form-row" style="margin-bottom:10px;">
       <input type="date" class="form-input" id="rpt-from">
@@ -372,8 +377,8 @@ datalist{display:none;}
       </div>
     </div>
     <div class="form-group">
-      <label class="form-label">Payment Method</label>
-      <select class="form-input" id="exp-paymethod"><option value="">Select...</option></select>
+      <label class="form-label">Payment Method *</label>
+      <select class="form-input" id="exp-paymethod" style="border-color:var(--border);" onchange="this.style.borderColor=this.value?'var(--green)':'var(--red)'"><option value="">Select payment method...</option></select>
     </div>
     <div class="form-group">
       <label class="form-label">Description / Notes</label>
@@ -639,7 +644,14 @@ function switchTab(tab){
   ['dashboard','reports','settings'].forEach(function(t){
     var s=document.getElementById('screen-'+t);
     var n=document.getElementById('nav-'+t);
-    if(s)s.style.display=t===tab?'block':'none';
+    if(s){
+      if(t===tab){
+        s.style.display=t==='dashboard'?'block':'block';
+        s.style.overflowY='auto';
+      } else {
+        s.style.display='none';
+      }
+    }
     if(n)n.classList.toggle('active',t===tab);
   });
   var titles={dashboard:'Expenses',reports:'Reports',settings:'Settings'};
@@ -791,6 +803,7 @@ function saveExpense(){
   if(!category){_savingExpense=false;showToast('Select a category');return;}
   if(!date){_savingExpense=false;showToast('Select a date');return;}
   if(!total){_savingExpense=false;showToast('Enter total amount');return;}
+  if(!payMethodId){_savingExpense=false;showToast('Select a payment method');document.getElementById('exp-paymethod').focus();return;}
 
   // ── Duplicate detection ────────────────────────────────────────────
   // Only check for NEW expenses (not edits)
@@ -1365,34 +1378,55 @@ function renderReports(){
     '<div class="summary-chip"><div class="chip-val" style="color:var(--red);">'+fmtM(bal)+'</div><div class="chip-lbl">Balance</div></div>'+
   '</div>';
   if(!exps.length){html+='<div class="empty"><div class="empty-icon">&#128269;</div><div class="empty-text">No results</div></div>';document.getElementById('report-content').innerHTML=html;return;}
+
+  // ── Category totals ── build map first (reused in multiple places)
   var byCat={};exps.forEach(function(e){if(!byCat[e.category])byCat[e.category]={t:0,p:0,b:0,n:0};byCat[e.category].t+=e.total||0;byCat[e.category].p+=e.paid||0;byCat[e.category].b+=e.balance||0;byCat[e.category].n++;});
-  html+='<div class="report-section"><div class="report-title">By Category</div>';
-  Object.entries(byCat).sort(function(a,b){return b[1].t-a[1].t;}).forEach(function(kv){
-    html+='<div class="report-row"><span><b>'+kv[0]+'</b>&nbsp;<span style="color:var(--muted);font-size:11px;">('+kv[1].n+')</span></span><span class="report-val">'+fmtM(kv[1].t)+'</span></div>';
+  var catEntries=Object.entries(byCat).sort(function(a,b){return b[1].t-a[1].t;});
+
+  // ── Category totals summary grid (big chips, one per category) ──────
+  html+='<div class="report-section">';
+  html+='<div class="report-title">&#128202; Category-wise Totals</div>';
+  html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:4px;">';
+  catEntries.forEach(function(kv){
+    var pct=tot>0?Math.round(kv[1].t/tot*100):0;
+    html+='<div style="background:var(--surface);border:1.5px solid var(--border);border-radius:10px;padding:10px 12px;">'
+      +'<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">'+kv[0]+'&nbsp;<span style="color:var(--muted);font-weight:400;">('+kv[1].n+')</span></div>'
+      +'<div style="font-family:\'DM Serif Display\',serif;font-size:17px;color:var(--amber);">'+fmtM(kv[1].t)+'</div>'
+      +'<div style="margin-top:5px;height:4px;background:var(--border);border-radius:2px;"><div style="height:4px;width:'+pct+'%;background:var(--amber);border-radius:2px;"></div></div>'
+      +'<div style="font-size:10px;color:var(--muted);margin-top:3px;">'+pct+'% of total'+(kv[1].b>0?'&nbsp;&middot;&nbsp;<span style="color:var(--red);">Bal: '+fmtM(kv[1].b)+'</span>':'')+'</div>'
+    +'</div>';
   });
-  html+='</div>';
+  html+='</div></div>';
+
+  // ── By Party ───────────────────────────────────────────────────────
   var byParty={};exps.forEach(function(e){if(!byParty[e.party])byParty[e.party]={t:0,n:0};byParty[e.party].t+=e.total||0;byParty[e.party].n++;});
   html+='<div class="report-section"><div class="report-title">By Party</div>';
   Object.entries(byParty).sort(function(a,b){return b[1].t-a[1].t;}).slice(0,15).forEach(function(kv){
     html+='<div class="report-row"><span><b>'+kv[0]+'</b>&nbsp;<span style="color:var(--muted);font-size:11px;">('+kv[1].n+')</span></span><span class="report-val">'+fmtM(kv[1].t)+'</span></div>';
   });
   html+='</div>';
-  var byPay={};exps.forEach(function(e){var pm=S.pm.find(function(p){return p.id===e.payMethodId;});var k=pm?pm.name:'Unknown';if(!byPay[k])byPay[k]={t:0,n:0};byPay[k].t+=e.total||0;byPay[k].n++;});
+
+  // ── By Payment Method ──────────────────────────────────────────────
+  var byPay={};exps.forEach(function(e){var pm=S.pm.find(function(p){return p.id===e.payMethodId;});var k=pm?pm.name:'⚠ No Payment Method';if(!byPay[k])byPay[k]={t:0,n:0};byPay[k].t+=e.total||0;byPay[k].n++;});
   html+='<div class="report-section"><div class="report-title">By Payment Method</div>';
   Object.entries(byPay).sort(function(a,b){return b[1].t-a[1].t;}).forEach(function(kv){
-    html+='<div class="report-row"><span>'+kv[0]+'</span><span class="report-val">'+fmtM(kv[1].t)+'</span></div>';
+    var isUnknown=kv[0].indexOf('No Payment')>=0;
+    html+='<div class="report-row"><span style="'+(isUnknown?'color:var(--red);font-weight:700;':'')+'">'+kv[0]+'&nbsp;<span style="font-size:11px;color:var(--muted);font-weight:400;">('+kv[1].n+')</span></span><span class="report-val">'+fmtM(kv[1].t)+'</span></div>';
   });
   html+='</div>';
+
+  // ── By Item ────────────────────────────────────────────────────────
   var byItem={};exps.forEach(function(e){if(!e.item)return;if(!byItem[e.item])byItem[e.item]={t:0,n:0};byItem[e.item].t+=e.total||0;byItem[e.item].n++;});
   if(Object.keys(byItem).length){
     html+='<div class="report-section"><div class="report-title">By Item</div>';
     Object.entries(byItem).sort(function(a,b){return b[1].t-a[1].t;}).forEach(function(kv){
-      html+='<div class="report-row"><span>'+kv[0]+'</span><span class="report-val">'+fmtM(kv[1].t)+'</span></div>';
+      html+='<div class="report-row"><span>'+kv[0]+'&nbsp;<span style="font-size:11px;color:var(--muted);">('+kv[1].n+')</span></span><span class="report-val">'+fmtM(kv[1].t)+'</span></div>';
     });
     html+='</div>';
   }
+
+  // ── Transactions list ──────────────────────────────────────────────
   html+='<div class="report-section"><div class="report-title">Transactions ('+exps.length+')</div>';
-  // Build duplicate map: key = date+party+amount+category; count > 1 = duplicate
   var dupMap={};
   exps.forEach(function(e){
     var k=e.date+'|'+e.party.toLowerCase()+'|'+e.total+'|'+e.category;
@@ -1403,9 +1437,10 @@ function renderReports(){
     var k=e.date+'|'+e.party.toLowerCase()+'|'+e.total+'|'+e.category;
     var isDup=dupMap[k]>1;
     var dupBadge=isDup?'<span style="background:#FF5722;color:#fff;font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;margin-left:6px;">DUP</span>':'';
-    html+='<div class="report-row" onclick="viewExpense(\''+e.id+'\')" style="cursor:pointer;flex-direction:column;align-items:flex-start;gap:2px;'+(isDup?'background:#FFF3E0;border-left:3px solid #FF5722;':'')+'">'+
-      '<div style="display:flex;justify-content:space-between;width:100%;"><b>'+e.party+dupBadge+'</b><span class="report-val">'+fmtM(e.total)+'</span></div>'+
-      '<div style="font-size:11px;color:var(--muted);">'+fmtDate(e.date)+'&nbsp;&middot;&nbsp;'+e.category+(e.item?'&nbsp;&middot;&nbsp;'+e.item:'')+(pm?'&nbsp;&middot;&nbsp;'+pm.name:'')+'</div>'+
+    var noPayBadge=!e.payMethodId?'<span style="background:var(--red);color:#fff;font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;margin-left:4px;">NO PAY</span>':'';
+    html+='<div class="report-row" onclick="viewExpense(\''+e.id+'\')" style="cursor:pointer;flex-direction:column;align-items:flex-start;gap:2px;'+(isDup?'background:#FFF3E0;border-left:3px solid #FF5722;':(!e.payMethodId?'background:var(--rl);border-left:3px solid var(--red);':''))+'">'+
+      '<div style="display:flex;justify-content:space-between;width:100%;"><span><b>'+e.party+'</b>'+dupBadge+noPayBadge+'</span><span class="report-val">'+fmtM(e.total)+'</span></div>'+
+      '<div style="font-size:11px;color:var(--muted);">'+fmtDate(e.date)+'&nbsp;&middot;&nbsp;'+e.category+(e.item?'&nbsp;&middot;&nbsp;'+e.item:'')+(pm?'&nbsp;&middot;&nbsp;'+pm.name:'&nbsp;&middot;&nbsp;<span style="color:var(--red);">No payment method</span>')+'</div>'+
     '</div>';
   });
   html+='</div>';
