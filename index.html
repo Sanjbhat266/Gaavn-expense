@@ -83,6 +83,7 @@ select.form-input{appearance:none;background-image:url("data:image/svg+xml,%3Csv
 .btn-amber{background:var(--amber);color:#fff;}
 .btn-red{background:var(--red);color:#fff;}
 .btn-sm{padding:7px 14px;width:auto;font-size:12px;border-radius:8px;display:inline-block;}
+.btn-blue{background:var(--blue);color:#fff;}
 .modal-overlay{position:fixed;inset:0;background:rgba(26,24,16,0.55);z-index:200;display:none;align-items:flex-end;justify-content:center;}
 .modal-overlay.open{display:flex;}
 .modal-sheet{background:var(--surface);border-radius:20px 20px 0 0;width:100%;max-height:92vh;overflow-y:auto;padding:20px 16px 32px;}
@@ -195,7 +196,9 @@ datalist{display:none;}
     </div>
     <input type="date" class="form-input" id="rpt-single-day" placeholder="Filter single day..." oninput="onRptSingleDay()" style="margin-bottom:10px;">
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
-      <button class="btn btn-primary btn-sm" onclick="downloadExcel()" style="background:var(--green);color:#fff;">&#8595; Download Excel</button>
+      <button class="btn btn-primary btn-sm" onclick="downloadExcel()" style="background:var(--green);color:#fff;">&#8595; Download CSV</button>
+      <button class="btn btn-amber btn-sm" onclick="viewDayExpenses()">&#128197; View Day</button>
+      <button class="btn btn-blue btn-sm" onclick="openImportStatement()" style="background:var(--blue);color:#fff;">&#128196; Import Statement</button>
       <button class="btn btn-secondary btn-sm" onclick="clearRptFilters()">Clear Filters</button>
       <button class="btn btn-secondary btn-sm" onclick="deduplicateExpenses()" style="border-color:#FF5722;color:#FF5722;">&#10003; Remove Duplicates</button>
     </div>
@@ -1615,7 +1618,590 @@ function showToast(msg){
   clearTimeout(_tt);_tt=setTimeout(function(){t.classList.remove('show');},2500);
 }
 
+// ── VIEW DAY EXPENSES ─────────────────────────────────────────────────
+function viewDayExpenses() {
+  var day = document.getElementById('rpt-single-day').value;
+  if(!day) {
+    // Try from-to if single day not set - use from date
+    day = document.getElementById('rpt-from').value;
+    if(!day) { showToast('Select a single day in the filter first'); return; }
+    // Check if from==to
+    var to = document.getElementById('rpt-to').value;
+    if(to && to !== day) { showToast('Set the same date in both From and To, or use the single-day filter'); return; }
+  }
+  var exps = S.expenses.filter(function(e){ return e.date === day; });
+  var d = new Date(day+'T00:00:00');
+  var label = d.toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+  document.getElementById('day-view-title').textContent = label;
+
+  if(!exps.length) {
+    document.getElementById('day-view-summary').innerHTML = '<div class="empty"><div class="empty-icon">📭</div><div class="empty-text">No expenses for this day</div></div>';
+    document.getElementById('day-view-list').innerHTML = '';
+    openModal('modal-day-view'); return;
+  }
+
+  var tot = exps.reduce(function(s,e){return s+(e.total||0);},0);
+  var paid = exps.reduce(function(s,e){return s+(e.paid||0);},0);
+  var byCat = {};
+  exps.forEach(function(e){ byCat[e.category]=(byCat[e.category]||0)+(e.total||0); });
+
+  document.getElementById('day-view-summary').innerHTML =
+    '<div class="summary-row" style="grid-template-columns:1fr 1fr;">' +
+    '<div class="summary-chip"><div class="chip-val">'+fmtM(tot)+'</div><div class="chip-lbl">Total ('+exps.length+' entries)</div></div>' +
+    '<div class="summary-chip"><div class="chip-val" style="color:var(--green);">'+fmtM(paid)+'</div><div class="chip-lbl">Paid</div></div>' +
+    '</div>' +
+    '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">' +
+    Object.entries(byCat).sort(function(a,b){return b[1]-a[1];}).map(function(kv){
+      return '<span style="background:var(--gl);color:var(--green);border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700;">'+kv[0]+' '+fmtM(kv[1])+'</span>';
+    }).join('') + '</div>';
+
+  var html = '';
+  exps.slice().sort(function(a,b){return (a.category||'').localeCompare(b.category||'');}).forEach(function(e){
+    var pm = S.pm.find(function(p){return p.id===e.payMethodId;});
+    html += '<div class="exp-card" onclick="viewExpense(\''+e.id+'\');closeModal(\'modal-day-view\');" style="margin-bottom:8px;">' +
+      '<div class="exp-row"><span class="exp-party">'+e.party+'</span><span class="exp-amount">'+fmtM(e.total||0)+'</span></div>' +
+      '<div class="exp-meta">'+e.category+(e.item?' · '+e.item:'')+(pm?' · '+pm.name:'')+'</div>' +
+      (e.desc?'<div class="exp-meta" style="margin-top:2px;">'+e.desc+'</div>':'') +
+    '</div>';
+  });
+  document.getElementById('day-view-list').innerHTML = html;
+  openModal('modal-day-view');
+}
+
+// ── IMPORT BANK/CC STATEMENT ──────────────────────────────────────────
+var _stmtSource = 'axis';
+var _stmtTxns = [];   // all parsed transactions
+var _missingTxns = []; // unmatched ones
+var _importIdx = 0;
+
+function setStmtSource(src) {
+  _stmtSource = src;
+  document.getElementById('src-axis').style.cssText = src==='axis'
+    ? 'flex:1;padding:10px;border:2px solid var(--amber);border-radius:10px;text-align:center;cursor:pointer;font-size:13px;font-weight:700;background:var(--al);'
+    : 'flex:1;padding:10px;border:1.5px solid var(--border);border-radius:10px;text-align:center;cursor:pointer;font-size:13px;font-weight:700;color:var(--muted);';
+  document.getElementById('src-kotak').style.cssText = src==='kotak'
+    ? 'flex:1;padding:10px;border:2px solid var(--amber);border-radius:10px;text-align:center;cursor:pointer;font-size:13px;font-weight:700;background:var(--al);'
+    : 'flex:1;padding:10px;border:1.5px solid var(--border);border-radius:10px;text-align:center;cursor:pointer;font-size:13px;font-weight:700;color:var(--muted);';
+}
+
+function openImportStatement() {
+  _stmtTxns = []; _missingTxns = [];
+  document.getElementById('stmt-file-input').value = '';
+  document.getElementById('stmt-results').style.display = 'none';
+  document.getElementById('stmt-processing').style.display = 'none';
+  setStmtSource('axis');
+  // Populate category dropdown
+  var cats = S.cats.map(function(c){ return '<option value="'+c+'">'+c+'</option>'; }).join('');
+  var ic = document.getElementById('import-category');
+  if(ic) ic.innerHTML = '<option value="">Select...</option>' + cats;
+  openModal('modal-import-stmt');
+}
+
+function processStatementFile(input) {
+  if(!input.files || !input.files[0]) return;
+  var file = input.files[0];
+  document.getElementById('stmt-processing').style.display = 'block';
+  document.getElementById('stmt-results').style.display = 'none';
+
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      var txns = [];
+      if(file.name.toLowerCase().endsWith('.csv')) {
+        txns = parseCSVStatement(e.target.result);
+      } else {
+        txns = parseXLSXStatement(e.target.result);
+      }
+      _stmtTxns = txns;
+      matchAndShowResults(txns);
+    } catch(err) {
+      document.getElementById('stmt-processing').style.display = 'none';
+      showToast('Error reading file: ' + err.message);
+    }
+  };
+  if(file.name.toLowerCase().endsWith('.csv')) {
+    reader.readAsText(file);
+  } else {
+    reader.readAsArrayBuffer(file);
+  }
+}
+
+function parseXLSXStatement(buffer) {
+  // Minimal XLSX parser using SheetJS-compatible approach
+  // We parse the binary data manually for simple cases
+  // Since we can't load SheetJS in this context, we'll read as text and try CSV fallback
+  // Actually let's decode it as best we can
+  var bytes = new Uint8Array(buffer);
+  var text = '';
+  for(var i=0; i<Math.min(bytes.length, 500000); i++) {
+    if(bytes[i] >= 32 && bytes[i] < 127) text += String.fromCharCode(bytes[i]);
+    else if(bytes[i] === 10 || bytes[i] === 13) text += '\n';
+  }
+  // Try to extract numbers and text
+  return parseRawText(text);
+}
+
+function parseRawText(text) {
+  // Extract date-amount pairs from raw text — fallback parser
+  return [];
+}
+
+function parseCSVStatement(text) {
+  var lines = text.split('\n').filter(function(l){ return l.trim(); });
+  var txns = [];
+  if(_stmtSource === 'axis') {
+    lines.forEach(function(line) {
+      var cols = parseCSVLine(line);
+      if(!cols[0] || !cols[3]) return;
+      var dateStr = cols[0].trim().replace(/'/g,'');
+      if(!dateStr.match(/\d+\s+\w+/)) return;
+      var dc = (cols[4]||'').trim();
+      if(dc !== 'Debit') return;
+      var amtStr = (cols[3]||'').replace('₹','').replace(/,/g,'').trim();
+      var amt = parseFloat(amtStr);
+      if(isNaN(amt) || amt <= 0) return;
+      var isoDate = parseAxisDate(dateStr);
+      if(!isoDate) return;
+      txns.push({date: isoDate, desc: cols[1]||'', amount: amt, source: 'Axis CC'});
+    });
+  } else {
+    // Kotak format: Sl No, Transaction Date, Value Date, Description, Ref No, Amount, DR/CR, Category
+    lines.forEach(function(line) {
+      var cols = parseCSVLine(line);
+      if(!cols[5] || !cols[6]) return;
+      if((cols[6]||'').trim() !== 'DR') return;
+      var amt = parseFloat((cols[5]||'').replace(/,/g,''));
+      if(isNaN(amt) || amt <= 0) return;
+      var dateStr = (cols[2]||cols[1]||'').trim();
+      var isoDate = parseKotakDate(dateStr);
+      if(!isoDate) return;
+      txns.push({date: isoDate, desc: (cols[3]||'').trim(), amount: amt, source: 'Kotak Bank', bankCat: (cols[7]||'').trim()});
+    });
+  }
+  return txns;
+}
+
+function parseCSVLine(line) {
+  var cols = [], cur = '', inQ = false;
+  for(var i=0; i<line.length; i++) {
+    var c = line[i];
+    if(c==='"') { inQ=!inQ; }
+    else if(c===',' && !inQ) { cols.push(cur.trim()); cur=''; }
+    else cur += c;
+  }
+  cols.push(cur.trim());
+  return cols;
+}
+
+function parseAxisDate(str) {
+  // "20 May '26" or "20 May 26"
+  var months = {jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+  var m = str.match(/(\d+)\s+(\w+)\s+[']?(\d+)/);
+  if(!m) return null;
+  var day = parseInt(m[1]);
+  var mon = months[(m[2]||'').toLowerCase().slice(0,3)];
+  var yr = parseInt(m[3]);
+  if(!mon) return null;
+  if(yr < 100) yr += 2000;
+  return yr+'-'+String(mon).padStart(2,'0')+'-'+String(day).padStart(2,'0');
+}
+
+function parseKotakDate(str) {
+  // "2026-05-31" or Excel date number
+  if(!str) return null;
+  if(str.match(/^\d{4}-\d{2}-\d{2}/)) return str.slice(0,10);
+  // Try d/m/yyyy
+  var m = str.match(/(\d+)\/(\d+)\/(\d{4})/);
+  if(m) return m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');
+  return null;
+}
+
+// Auto-categorize based on transaction description
+function autoCategorizeTxn(desc, amount) {
+  var d = desc.toLowerCase();
+  var cat = '', party = '', item = '';
+
+  // Fuel patterns
+  if(d.includes('petroleum') || d.includes('petrol') || d.includes('fuel station') || d.includes('bhongle') || d.includes('jagtap petroleum') || d.includes('wandhekar') || d.includes('balaji petroleum') || d.includes('komal anant')) {
+    cat='PETROL'; party=extractPartyName(desc); item='Petrol';
+  } else if(d.includes('cng') || d.includes('torrent gas') || d.includes('arya gas') || d.includes('jai ganesh pe')) {
+    cat='CNG'; party=extractPartyName(desc); item='CNG';
+  } else if(d.includes('wood') || d.includes('bbm venture') || d.includes('fuel')) {
+    cat='WOOD FUEL'; party=extractPartyName(desc);
+  }
+  // Salary
+  else if(d.includes('salary') || d.includes('neft') && amount >= 5000) {
+    cat='SALARY'; party=extractNEFTParty(desc);
+  }
+  // Utilities
+  else if(d.includes('msedcl') || d.includes('electric') || d.includes('mahadiscom')) {
+    cat='ELECTRIC BILL'; party='MSEDCL';
+  }
+  // Packing
+  else if(d.includes('ganesh traders') || d.includes('packing')) {
+    cat='PACKING MATERIALS'; party=extractPartyName(desc);
+  }
+  // Transport
+  else if(d.includes('transport') || d.includes('tempo') || d.includes('truck')) {
+    cat='TRANSPORT'; party=extractPartyName(desc);
+  }
+  // Food
+  else if(d.includes('patil katta') || d.includes('hotel') || d.includes('misal') || d.includes('food')) {
+    cat='FOOD & TEA'; party=extractPartyName(desc);
+  }
+  // Vehicle maintenance
+  else if(d.includes('service station') || d.includes('garage') || d.includes('tyres')) {
+    cat='VEHICLE MAINTENANCE'; party=extractPartyName(desc);
+  }
+  // IRCTC/travel
+  else if(d.includes('irctc') || d.includes('travel') || d.includes('railway')) {
+    cat='TRAVEL'; party='IRCTC'; item='Train Ticket';
+  }
+  // Bank charges / surcharge — skip these
+  else if(d.includes('surcharge') || d.includes('gst on fuel') || d.includes('bank charge') || d.includes('chrg')) {
+    return null; // skip bank charges
+  }
+  // CC payment
+  else if(d.includes('credit card') || d.includes('axis bank')) {
+    return null; // skip CC-to-CC payments
+  }
+
+  // Use Kotak bank category if available and not yet categorized
+  return {cat: cat || '', party: party || extractPartyName(desc), item: item || ''};
+}
+
+function extractPartyName(desc) {
+  // Extract meaningful name from UPI description like "UPI/SHUBHAM CARRY/gpay-..."
+  var m = desc.match(/UPI\/([^\/]+)\//i);
+  if(m) return m[1].trim();
+  var m2 = desc.match(/NEFT\/([^\/]+)\//i) || desc.match(/MB:\s*Sent NEFT\/([^\/]+)\//i);
+  if(m2) return m2[1].trim();
+  return desc.split('/')[0].replace('UPI','').trim();
+}
+
+function extractNEFTParty(desc) {
+  var m = desc.match(/Sent NEFT\/\s*([^\/]+)/i);
+  if(m) return m[1].trim();
+  return extractPartyName(desc);
+}
+
+function matchAndShowResults(txns) {
+  // Build a set of existing expenses for matching
+  // Match by: date + amount (within ±1 rupee)
+  var matched = [], missing = [], skipped = [];
+
+  txns.forEach(function(txn) {
+    var autoInfo = autoCategorizeTxn(txn.desc, txn.amount);
+    if(!autoInfo) { skipped.push(txn); return; } // bank charges etc
+
+    // Check if this transaction already exists in expenses
+    var found = S.expenses.some(function(e) {
+      var sameDate = e.date === txn.date;
+      var sameAmt  = Math.abs((e.total||0) - txn.amount) < 2;
+      return sameDate && sameAmt;
+    });
+
+    if(found) {
+      matched.push(txn);
+    } else {
+      txn.autoCat   = autoInfo.cat;
+      txn.autoParty = autoInfo.party;
+      txn.autoItem  = autoInfo.item;
+      missing.push(txn);
+    }
+  });
+
+  _missingTxns = missing;
+  document.getElementById('stmt-processing').style.display = 'none';
+
+  // Show summary
+  var summaryHtml =
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;">' +
+    '<div class="summary-chip"><div class="chip-val">'+txns.length+'</div><div class="chip-lbl">Total</div></div>' +
+    '<div class="summary-chip"><div class="chip-val" style="color:var(--green);">'+matched.length+'</div><div class="chip-lbl">Matched</div></div>' +
+    '<div class="summary-chip"><div class="chip-val" style="color:var(--red);">'+missing.length+'</div><div class="chip-lbl">Missing</div></div>' +
+    '</div>';
+  if(skipped.length) summaryHtml += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">'+skipped.length+' bank charges/surcharges skipped automatically</div>';
+  document.getElementById('stmt-summary').innerHTML = summaryHtml;
+
+  // Show missing transactions
+  if(!missing.length) {
+    document.getElementById('stmt-missing-list').innerHTML =
+      '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">All transactions already in app!</div></div>';
+  } else {
+    var html = '<div style="font-size:12px;font-weight:700;color:var(--red);margin-bottom:8px;">'+missing.length+' MISSING TRANSACTIONS — tap each to review &amp; add:</div>';
+    missing.forEach(function(txn, i) {
+      var catBadge = txn.autoCat
+        ? '<span style="background:var(--gl);color:var(--green);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700;margin-left:6px;">'+txn.autoCat+'</span>'
+        : '<span style="background:var(--al);color:var(--amber);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700;margin-left:6px;">Needs category</span>';
+      html += '<div onclick="reviewImportItem('+i+')" style="background:var(--surface);border:1.5px solid '+(txn.autoCat?'var(--border)':'var(--amber)')+';border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;" id="missing-item-'+i+'">' +
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;">' +
+        '<div style="flex:1;min-width:0;">' +
+        '<div style="font-size:13px;font-weight:700;margin-bottom:2px;">'+(txn.autoParty||txn.desc.slice(0,40))+'</div>' +
+        '<div style="font-size:11px;color:var(--muted);">'+txn.date+'&nbsp;·&nbsp;'+txn.source+'</div>' +
+        '<div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+txn.desc.slice(0,50)+'</div>' +
+        '</div>' +
+        '<div style="text-align:right;flex-shrink:0;margin-left:10px;">' +
+        '<div style="font-size:15px;font-weight:700;color:var(--amber);">'+fmtM(txn.amount)+'</div>' +
+        catBadge +
+        '</div></div>' +
+      '</div>';
+    });
+    document.getElementById('stmt-missing-list').innerHTML = html;
+  }
+
+  document.getElementById('stmt-results').style.display = 'block';
+}
+
+function reviewImportItem(idx) {
+  openImportItemAt(idx);
+}
+
+function openImportItemAt(idx) {
+  // Find next non-ignored, non-done item if current is processed
+  var txn = _missingTxns[idx];
+  if(!txn) return;
+  document.getElementById('import-item-idx').value = idx;
+  document.getElementById('import-item-counter').textContent = (idx+1) + ' of ' + _missingTxns.length;
+  document.getElementById('import-item-desc').textContent = txn.desc;
+  document.getElementById('import-item-meta').textContent = txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN') + ' · ' + txn.source;
+  document.getElementById('import-party').value = txn.autoParty || '';
+  document.getElementById('import-item-name').value = txn.autoItem || '';
+  document.getElementById('import-amount').value = txn.amount;
+  document.getElementById('import-date').value = txn.date;
+  // Populate and set category
+  var cats = S.cats.map(function(c){ return '<option value="'+c+'">'+c+'</option>'; }).join('');
+  document.getElementById('import-category').innerHTML = '<option value="">Select...</option>' + cats;
+  document.getElementById('import-category').value = txn.autoCat || '';
+  // Show status if already processed
+  var meta = document.getElementById('import-item-meta');
+  if(txn._done) {
+    meta.innerHTML = '<span style="color:var(--green);font-weight:700;">✓ Added</span> · ' + txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN');
+  } else if(txn._ignored) {
+    meta.innerHTML = '<span style="color:var(--red);font-weight:700;">✕ Ignored (already in app)</span> · ' + txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN');
+  } else {
+    meta.textContent = txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN') + ' · ' + txn.source;
+  }
+  openModal('modal-import-item');
+}
+
+function prevImportItem() {
+  var idx = parseInt(document.getElementById('import-item-idx').value);
+  if(idx > 0) openImportItemAt(idx - 1);
+  else showToast('Already at first item');
+}
+
+function nextImportItem() {
+  var idx = parseInt(document.getElementById('import-item-idx').value);
+  if(idx < _missingTxns.length - 1) openImportItemAt(idx + 1);
+  else { showToast('Last item reached'); closeModal('modal-import-item'); }
+}
+
+function ignoreImportItem() {
+  var idx = parseInt(document.getElementById('import-item-idx').value);
+  var txn = _missingTxns[idx];
+  if(txn) txn._ignored = true;
+  // Mark card in list as ignored
+  var el = document.getElementById('missing-item-'+idx);
+  if(el) {
+    el.style.opacity = '0.4';
+    el.style.background = 'var(--rl)';
+    var badge = el.querySelector('.status-badge');
+    if(!badge) {
+      var b = document.createElement('span');
+      b.className = 'status-badge';
+      b.style.cssText = 'font-size:10px;font-weight:700;color:var(--red);margin-left:6px;';
+      b.textContent = '✕ IGNORED';
+      var nameEl = el.querySelector('div[style*="font-weight:700"]');
+      if(nameEl) nameEl.appendChild(b);
+    }
+    el.onclick = function(){ openImportItemAt(idx); }; // still tappable to un-ignore
+  }
+  showToast('Marked as already added');
+  // Auto-advance to next unprocessed item
+  var next = idx + 1;
+  while(next < _missingTxns.length && (_missingTxns[next]._done || _missingTxns[next]._ignored)) next++;
+  if(next < _missingTxns.length) openImportItemAt(next);
+  else { closeModal('modal-import-item'); showToast('All items reviewed'); }
+}
+
+function saveImportItem() {
+  var idx = parseInt(document.getElementById('import-item-idx').value);
+  var party = document.getElementById('import-party').value.trim();
+  var cat = document.getElementById('import-category').value;
+  var item = document.getElementById('import-item-name').value.trim();
+  var amount = parseFloat(document.getElementById('import-amount').value)||0;
+  var date = document.getElementById('import-date').value;
+
+  if(!party) { showToast('Enter party name'); return; }
+  if(!cat) { showToast('Select a category'); return; }
+  if(!amount) { showToast('Enter amount'); return; }
+  if(!date) { showToast('Select date'); return; }
+
+  var pm = S.pm.find(function(p){ return p.name === (_stmtSource==='axis'?'Credit Card':'Kotak Bank') || p.type === (_stmtSource==='axis'?'credit_card':'bank'); });
+
+  var exp = {
+    id: 'EXP'+Date.now().toString().slice(-10),
+    date: date, party: party, category: cat, item: item,
+    state: 'Maharashtra', total: amount, paid: amount, balance: 0,
+    gstMode: 'none', gstRate: '', gstAmount: 0, baseAmount: 0,
+    payMethodId: pm ? pm.id : '',
+    ref: '', driveLink: '', desc: 'Imported from '+(_stmtSource==='axis'?'Axis CC':'Kotak Bank')+' statement',
+    role: S.role
+  };
+
+  S.expenses.push(exp);
+  localStorage.setItem(LS_EXP, JSON.stringify(S.expenses));
+  syncToSheet(exp);
+
+  // Mark txn as done
+  if(_missingTxns[idx]) _missingTxns[idx]._done = true;
+
+  // Update card in list
+  var el = document.getElementById('missing-item-'+idx);
+  if(el) {
+    el.style.cssText = 'background:#E8F5E9;border:1.5px solid var(--green);border-radius:10px;padding:10px 12px;margin-bottom:8px;opacity:0.7;';
+    el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;"><span style="color:var(--green);font-size:16px;">✓</span><span style="font-size:13px;font-weight:600;color:var(--green);">Added: '+party+' · '+fmtM(amount)+'</span></div>';
+    el.onclick = function(){ openImportItemAt(idx); };
+  }
+
+  renderDashboard();
+  showToast('✓ Added: '+party+' '+fmtM(amount));
+
+  // Auto-advance to next unprocessed item
+  var next = idx + 1;
+  while(next < _missingTxns.length && (_missingTxns[next]._done || _missingTxns[next]._ignored)) next++;
+  if(next < _missingTxns.length) openImportItemAt(next);
+  else { closeModal('modal-import-item'); showToast('All items reviewed!'); }
+}
+
+function skipImportItem() {
+  closeModal('modal-import-item');
+}
+
+function importAllMissing() {
+  var added = 0;
+  _missingTxns.forEach(function(txn, idx) {
+    if(!txn.autoCat || !txn.autoParty) return; // skip if no auto-category
+    var pm = S.pm.find(function(p){ return p.name === (_stmtSource==='axis'?'Credit Card':'Kotak Bank'); });
+    var exp = {
+      id: 'EXP'+Date.now().toString().slice(-10)+(added++),
+      date: txn.date, party: txn.autoParty, category: txn.autoCat, item: txn.autoItem||'',
+      state: 'Maharashtra', total: txn.amount, paid: txn.amount, balance: 0,
+      gstMode: 'none', gstRate: '', gstAmount: 0, baseAmount: 0,
+      payMethodId: pm ? pm.id : '',
+      ref: '', driveLink: '', desc: 'Imported from '+(_stmtSource==='axis'?'Axis CC':'Kotak Bank')+' statement',
+      role: S.role
+    };
+    S.expenses.push(exp);
+    syncToSheet(exp);
+    var el = document.getElementById('missing-item-'+idx);
+    if(el) el.style.opacity = '0.4';
+  });
+  localStorage.setItem(LS_EXP, JSON.stringify(S.expenses));
+  renderDashboard();
+  showToast('✓ Added '+added+' auto-categorized expenses');
+  if(_missingTxns.some(function(t){return !t.autoCat;})) {
+    showToast('Some transactions need manual categorization — tap each to review');
+  }
+}
+
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',_init);}else{_init();}
 </script>
+<!-- MODAL: DAY VIEW -->
+<div class="modal-overlay" id="modal-day-view">
+  <div class="modal-sheet" style="max-height:92vh;">
+    <div class="modal-handle"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <div class="modal-title" id="day-view-title" style="margin-bottom:0;">Day Expenses</div>
+      <button onclick="closeModal('modal-day-view')" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--muted);">&#10005;</button>
+    </div>
+    <div id="day-view-summary" style="margin-bottom:12px;"></div>
+    <div id="day-view-list"></div>
+    <div style="margin-top:16px;">
+      <button class="btn btn-secondary" onclick="closeModal('modal-day-view')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: IMPORT BANK/CC STATEMENT -->
+<div class="modal-overlay" id="modal-import-stmt">
+  <div class="modal-sheet" style="max-height:92vh;overflow-y:auto;">
+    <div class="modal-handle"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <div class="modal-title" style="margin-bottom:0;">&#128196; Import Statement</div>
+      <button onclick="closeModal('modal-import-stmt')" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--muted);">&#10005;</button>
+    </div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:14px;">Upload your Axis CC statement or Kotak bank statement (Excel/CSV). The app will find transactions missing from your expense records.</div>
+    <!-- Source selector -->
+    <div style="display:flex;gap:8px;margin-bottom:14px;">
+      <div id="src-axis" onclick="setStmtSource('axis')" style="flex:1;padding:10px;border:2px solid var(--amber);border-radius:10px;text-align:center;cursor:pointer;font-size:13px;font-weight:700;background:var(--al);">&#128179; Axis CC</div>
+      <div id="src-kotak" onclick="setStmtSource('kotak')" style="flex:1;padding:10px;border:1.5px solid var(--border);border-radius:10px;text-align:center;cursor:pointer;font-size:13px;font-weight:700;color:var(--muted);">&#127968; Kotak Bank</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Upload File (Excel or CSV)</label>
+      <input type="file" id="stmt-file-input" accept=".xlsx,.xls,.csv" class="form-input" style="padding:8px;" onchange="processStatementFile(this)">
+    </div>
+    <div id="stmt-processing" style="display:none;text-align:center;padding:20px;color:var(--muted);font-size:13px;">&#9203; Processing file...</div>
+    <div id="stmt-results" style="display:none;">
+      <div id="stmt-summary" style="margin-bottom:14px;"></div>
+      <div id="stmt-missing-list"></div>
+      <div style="margin-top:14px;display:flex;gap:8px;">
+        <button class="btn btn-primary" onclick="importAllMissing()">&#10003; Add All Missing</button>
+        <button class="btn btn-secondary" onclick="closeModal('modal-import-stmt')">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: REVIEW IMPORT ITEM -->
+<div class="modal-overlay" id="modal-import-item">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+      <div class="modal-title" style="margin-bottom:0;">Add Missing Transaction</div>
+      <div id="import-item-counter" style="font-size:12px;color:var(--muted);font-weight:600;"></div>
+    </div>
+    <!-- Prev / Next navigation -->
+    <div style="display:flex;gap:6px;margin-bottom:12px;">
+      <button onclick="prevImportItem()" style="background:var(--surface);border:1.5px solid var(--border);border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer;color:var(--muted);">← Prev</button>
+      <button onclick="nextImportItem()" style="background:var(--surface);border:1.5px solid var(--border);border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer;color:var(--muted);">Next →</button>
+      <button onclick="ignoreImportItem()" style="background:var(--rl);border:1.5px solid var(--red);border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer;color:var(--red);margin-left:auto;">✕ Already Added</button>
+    </div>
+    <input type="hidden" id="import-item-idx">
+    <div style="background:var(--bl);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:13px;">
+      <div id="import-item-desc" style="font-weight:700;margin-bottom:4px;"></div>
+      <div id="import-item-meta" style="color:var(--muted);"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Party Name *</label>
+      <input type="text" class="form-input" id="import-party" placeholder="e.g. Shubham Carry">
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Category *</label>
+        <select class="form-input" id="import-category"><option value="">Select...</option></select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Item</label>
+        <input type="text" class="form-input" id="import-item-name" placeholder="Optional">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Amount ₹ *</label>
+        <input type="number" class="form-input" id="import-amount">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Date *</label>
+        <input type="date" class="form-input" id="import-date">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px;">
+      <button class="btn btn-secondary" onclick="closeModal('modal-import-item')" style="flex:1;">Close</button>
+      <button class="btn btn-primary" onclick="saveImportItem()" style="flex:1;">✓ Add Expense</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
