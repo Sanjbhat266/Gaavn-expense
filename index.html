@@ -1703,47 +1703,91 @@ function processStatementFile(input) {
   document.getElementById('stmt-processing').style.display = 'block';
   document.getElementById('stmt-results').style.display = 'none';
 
+  var isCSV = file.name.toLowerCase().endsWith('.csv');
+
+  if(isCSV) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        var txns = parseCSVStatement(e.target.result);
+        _stmtTxns = txns;
+        matchAndShowResults(txns);
+      } catch(err) {
+        document.getElementById('stmt-processing').style.display = 'none';
+        showToast('Error: ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  } else {
+    // XLSX — load SheetJS from CDN then parse
+    if(window.XLSX) {
+      readXLSXWithSheetJS(file);
+    } else {
+      var script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+      script.onload = function() { readXLSXWithSheetJS(file); };
+      script.onerror = function() {
+        document.getElementById('stmt-processing').style.display = 'none';
+        showToast('Could not load XLSX library — try saving as CSV from Excel first');
+      };
+      document.head.appendChild(script);
+    }
+  }
+}
+
+function readXLSXWithSheetJS(file) {
   var reader = new FileReader();
   reader.onload = function(e) {
     try {
-      var txns = [];
-      if(file.name.toLowerCase().endsWith('.csv')) {
-        txns = parseCSVStatement(e.target.result);
-      } else {
-        txns = parseXLSXStatement(e.target.result);
-      }
+      var data = new Uint8Array(e.target.result);
+      var workbook = XLSX.read(data, {type:'array', cellDates:true});
+      var sheetName = workbook.SheetNames[0];
+      var sheet = workbook.Sheets[sheetName];
+      // Convert to array of arrays
+      var rows = XLSX.utils.sheet_to_json(sheet, {header:1, raw:false, dateNF:'yyyy-mm-dd'});
+      var txns = parseXLSXRows(rows);
       _stmtTxns = txns;
       matchAndShowResults(txns);
     } catch(err) {
       document.getElementById('stmt-processing').style.display = 'none';
-      showToast('Error reading file: ' + err.message);
+      showToast('Error reading XLSX: ' + err.message);
     }
   };
-  if(file.name.toLowerCase().endsWith('.csv')) {
-    reader.readAsText(file);
+  reader.readAsArrayBuffer(file);
+}
+
+function parseXLSXRows(rows) {
+  var txns = [];
+  if(_stmtSource === 'axis') {
+    // Axis CC: Date | Transaction Details | (blank) | Amount (INR) | Debit/Credit | (blank)
+    rows.forEach(function(row) {
+      if(!row[0] || !row[3]) return;
+      var dateStr = String(row[0]).trim().replace(/'/g,'');
+      if(!dateStr.match(/\d+\s+\w+/)) return;
+      var dc = String(row[4]||'').trim();
+      if(dc !== 'Debit') return;
+      var amtStr = String(row[3]||'').replace('₹','').replace(/,/g,'').trim();
+      var amt = parseFloat(amtStr);
+      if(isNaN(amt) || amt <= 0) return;
+      var isoDate = parseAxisDate(dateStr);
+      if(!isoDate) return;
+      txns.push({date: isoDate, desc: String(row[1]||'').trim(), amount: amt, source: 'Axis CC'});
+    });
   } else {
-    reader.readAsArrayBuffer(file);
+    // Kotak: Sl No | Transaction Date | Value Date | Description | Chq/Ref | Amount | DR/CR | Category
+    rows.forEach(function(row) {
+      if(!row[5] || !row[6]) return;
+      if(String(row[6]).trim() !== 'DR') return;
+      var amt = parseFloat(String(row[5]).replace(/,/g,''));
+      if(isNaN(amt) || amt <= 0) return;
+      // Value date preferred (col 2), fallback to transaction date (col 1)
+      var dateVal = row[2] || row[1];
+      var isoDate = parseKotakDate(String(dateVal||'').trim());
+      if(!isoDate) return;
+      txns.push({date: isoDate, desc: String(row[3]||'').trim(), amount: amt, source: 'Kotak Bank', bankCat: String(row[7]||'').trim()});
+    });
   }
-}
-
-function parseXLSXStatement(buffer) {
-  // Minimal XLSX parser using SheetJS-compatible approach
-  // We parse the binary data manually for simple cases
-  // Since we can't load SheetJS in this context, we'll read as text and try CSV fallback
-  // Actually let's decode it as best we can
-  var bytes = new Uint8Array(buffer);
-  var text = '';
-  for(var i=0; i<Math.min(bytes.length, 500000); i++) {
-    if(bytes[i] >= 32 && bytes[i] < 127) text += String.fromCharCode(bytes[i]);
-    else if(bytes[i] === 10 || bytes[i] === 13) text += '\n';
-  }
-  // Try to extract numbers and text
-  return parseRawText(text);
-}
-
-function parseRawText(text) {
-  // Extract date-amount pairs from raw text — fallback parser
-  return [];
+  return txns;
 }
 
 function parseCSVStatement(text) {
