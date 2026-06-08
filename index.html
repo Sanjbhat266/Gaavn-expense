@@ -1543,10 +1543,11 @@ function getAppsScript(){
     '// GAAVN FRESH Expense Tracker - Google Apps Script',
     '// Deploy: Execute as Me | Access: Anyone',
     'var SS_ID=SpreadsheetApp.getActiveSpreadsheet().getId();',
-    'function doGet(e){try{var a=e.parameter.action||"";if(a=="ping")return j({pong:true});if(a=="logExpense")return logExp(e.parameter);return j({error:"unknown"});}catch(err){return j({error:err.message});}}',
+    'function doGet(e){try{var a=e.parameter.action||"";if(a=="ping")return j({pong:true});if(a=="logExpense")return logExp(e.parameter);if(a=="getExpenses")return getExps(e.parameter);return j({error:"unknown"});}catch(err){return j({error:err.message});}}',
     'function j(o){return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);}',
     'function getSheet(date){var ss=SpreadsheetApp.openById(SS_ID);var m=(date||"").slice(0,7)||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"yyyy-MM");var name="Expenses_"+m;var sh=ss.getSheetByName(name)||ss.insertSheet(name);if(sh.getLastRow()===0){var h=["ID","Date","Party","Category","Item","State","Total","Paid","Balance","GST Mode","GST Rate","GST Amt","Base Amt","Payment","Ref","Drive Link","Description","Role","Synced"];sh.appendRow(h);sh.getRange(1,1,1,h.length).setFontWeight("bold").setBackground("#1A3A1F").setFontColor("#fff");sh.setFrozenRows(1);}return sh;}',
-    'function logExp(p){var sh=getSheet(p.date);var now=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"dd/MM/yyyy HH:mm");var row=[p.expId,p.date,p.party,p.category,p.item||"",p.state||"",+p.total||0,+p.paid||0,+p.balance||0,p.gstMode||"none",p.gstRate||"",+p.gstAmt||0,+p.baseAmt||0,p.payMethod||"",p.ref||"",p.driveLink||"",p.desc||"",p.role||"",now];var data=sh.getDataRange().getValues();for(var r=1;r<data.length;r++){if(String(data[r][0])===String(p.expId)){sh.getRange(r+1,1,1,row.length).setValues([row]);sh.getRange(r+1,1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"updated"});}}sh.appendRow(row);sh.getRange(sh.getLastRow(),1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"ok"});}'
+    'function logExp(p){var sh=getSheet(p.date);var now=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"dd/MM/yyyy HH:mm");var row=[p.expId,p.date,p.party,p.category,p.item||"",p.state||"",+p.total||0,+p.paid||0,+p.balance||0,p.gstMode||"none",p.gstRate||"",+p.gstAmt||0,+p.baseAmt||0,p.payMethod||"",p.ref||"",p.driveLink||"",p.desc||"",p.role||"",now];var data=sh.getDataRange().getValues();for(var r=1;r<data.length;r++){if(String(data[r][0])===String(p.expId)){sh.getRange(r+1,1,1,row.length).setValues([row]);sh.getRange(r+1,1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"updated"});}}sh.appendRow(row);sh.getRange(sh.getLastRow(),1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"ok"});}',
+    'function getExps(p){var ss=SpreadsheetApp.openById(SS_ID);var month=p.month||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"yyyy-MM");var shName="Expenses_"+month;var sh=ss.getSheetByName(shName);if(!sh)return j({expenses:[],month:month});var data=sh.getDataRange().getValues();if(data.length<2)return j({expenses:[],month:month});var headers=data[0];var rows=data.slice(1).map(function(r){var o={};headers.forEach(function(h,i){o[h]=r[i];});return o;});return j({expenses:rows,month:month,count:rows.length});}',
   ].join('\n');
 }
 
@@ -1668,6 +1669,79 @@ function viewDayExpenses() {
   openModal('modal-day-view');
 }
 
+// ── LOAD EXPENSES FROM SHEET (for desktop with empty localStorage) ────
+async function loadExpensesFromSheet() {
+  if(!S.url) { showToast('Set Sheet URL in Settings first'); return; }
+  var prog = document.getElementById('load-exp-progress');
+  if(prog) prog.textContent = 'Loading...';
+
+  try {
+    // Fetch current month and previous month sheets
+    var months = [];
+    var now = new Date();
+    for(var i=0; i<3; i++) {
+      var d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+      var m = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+      months.push(m);
+    }
+
+    var loaded = 0;
+    for(var mi=0; mi<months.length; mi++) {
+      var month = months[mi];
+      try {
+        var res = await fetch(S.url+'?action=getExpenses&month='+month);
+        var json = await res.json();
+        if(json.expenses && json.expenses.length) {
+          json.expenses.forEach(function(row) {
+            var id = row['ID'] || row[0];
+            if(!id || S.expenses.find(function(e){return e.id===id;})) return;
+            var pm = S.pm.find(function(p){return p.name===(row['Payment']||row[13]);});
+            S.expenses.push({
+              id: id,
+              date: (row['Date']||row[1]||'').slice(0,10),
+              party: row['Party']||row[2]||'',
+              category: row['Category']||row[3]||'',
+              item: row['Item']||row[4]||'',
+              state: row['State']||row[5]||'',
+              total: parseFloat(row['Total']||row[6])||0,
+              paid: parseFloat(row['Paid']||row[7])||0,
+              balance: parseFloat(row['Balance']||row[8])||0,
+              gstMode: row['GST Mode']||row[9]||'none',
+              gstRate: row['GST Rate']||row[10]||'',
+              gstAmount: parseFloat(row['GST Amt']||row[11])||0,
+              baseAmount: parseFloat(row['Base Amt']||row[12])||0,
+              payMethodId: pm?pm.id:'',
+              ref: row['Ref']||row[14]||'',
+              desc: row['Description']||row[16]||'',
+            });
+            loaded++;
+          });
+        }
+      } catch(e) {}
+    }
+
+    if(loaded > 0) {
+      localStorage.setItem(LS_EXP, JSON.stringify(S.expenses));
+      if(prog) prog.textContent = '✓ '+loaded+' expenses loaded!';
+      // Refresh the status banner
+      var statusEl = document.getElementById('import-exp-status');
+      if(statusEl) {
+        statusEl.style.background = 'var(--gl)';
+        statusEl.style.border = '1px solid var(--green)';
+        statusEl.innerHTML = '<span style="color:var(--green);">✓ <b>'+S.expenses.length+' expenses loaded</b> — ready to compare against statement.</span>';
+      }
+      renderDashboard();
+      showToast('✓ Loaded '+loaded+' expenses from Sheet');
+    } else {
+      if(prog) prog.textContent = 'No data found — check Sheet URL in Settings';
+      showToast('No expenses found in Sheet');
+    }
+  } catch(err) {
+    if(prog) prog.textContent = 'Failed — check internet connection';
+    showToast('Failed to load from Sheet');
+  }
+}
+
 // ── IMPORT BANK/CC STATEMENT ──────────────────────────────────────────
 var _stmtSource = 'axis';
 var _stmtTxns = [];   // all parsed transactions
@@ -1690,6 +1764,23 @@ function openImportStatement() {
   document.getElementById('stmt-results').style.display = 'none';
   document.getElementById('stmt-processing').style.display = 'none';
   setStmtSource('axis');
+
+  // Show expense count — warn if empty (desktop with no local data)
+  var expCount = S.expenses.length;
+  var statusEl = document.getElementById('import-exp-status');
+  if(expCount === 0) {
+    statusEl.style.background = 'var(--rl)';
+    statusEl.style.border = '1px solid var(--red)';
+    statusEl.innerHTML = '<b style="color:var(--red);">⚠ No expenses loaded</b> — the app has no expense data on this device. '
+      + 'Load from Google Sheet first so the app can correctly find what\'s missing.<br>'
+      + '<button onclick="loadExpensesFromSheet()" style="margin-top:8px;background:var(--blue);color:#fff;border:none;border-radius:8px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;">☁ Load Expenses from Sheet</button>'
+      + '<span id="load-exp-progress" style="font-size:11px;color:var(--muted);margin-left:8px;"></span>';
+  } else {
+    statusEl.style.background = 'var(--gl)';
+    statusEl.style.border = '1px solid var(--green)';
+    statusEl.innerHTML = '<span style="color:var(--green);">✓ <b>'+expCount+' expenses loaded</b> — ready to compare against statement.</span>';
+  }
+
   // Populate category dropdown
   var cats = S.cats.map(function(c){ return '<option value="'+c+'">'+c+'</option>'; }).join('');
   var ic = document.getElementById('import-category');
@@ -1796,30 +1887,32 @@ function parseCSVStatement(text) {
   if(_stmtSource === 'axis') {
     lines.forEach(function(line) {
       var cols = parseCSVLine(line);
-      if(!cols[0] || !cols[3]) return;
-      var dateStr = cols[0].trim().replace(/'/g,'');
+      if(cols.length < 5) return;
+      var dateStr = (cols[0]||'').trim().replace(/^["']|["']$/g,'').replace(/'/g,'');
       if(!dateStr.match(/\d+\s+\w+/)) return;
-      var dc = (cols[4]||'').trim();
+      var dc = (cols[4]||'').trim().replace(/^["']|["']$/g,'');
       if(dc !== 'Debit') return;
-      var amtStr = (cols[3]||'').replace('₹','').replace(/,/g,'').trim();
+      // Handle ₹ symbol, spaces, commas — works even if symbol is stripped
+      var amtStr = (cols[3]||'').replace(/[₹\s,"']/g,'').trim();
       var amt = parseFloat(amtStr);
       if(isNaN(amt) || amt <= 0) return;
       var isoDate = parseAxisDate(dateStr);
       if(!isoDate) return;
-      txns.push({date: isoDate, desc: cols[1]||'', amount: amt, source: 'Axis CC'});
+      txns.push({date: isoDate, desc: (cols[1]||'').replace(/^["']|["']$/g,'').trim(), amount: amt, source: 'Axis CC'});
     });
   } else {
-    // Kotak format: Sl No, Transaction Date, Value Date, Description, Ref No, Amount, DR/CR, Category
     lines.forEach(function(line) {
       var cols = parseCSVLine(line);
-      if(!cols[5] || !cols[6]) return;
-      if((cols[6]||'').trim() !== 'DR') return;
-      var amt = parseFloat((cols[5]||'').replace(/,/g,''));
+      if(cols.length < 7) return;
+      var dc = (cols[6]||'').trim().replace(/^["']|["']$/g,'');
+      if(dc !== 'DR') return;
+      var amtStr = (cols[5]||'').replace(/[,\s"']/g,'').trim();
+      var amt = parseFloat(amtStr);
       if(isNaN(amt) || amt <= 0) return;
-      var dateStr = (cols[2]||cols[1]||'').trim();
+      var dateStr = ((cols[2]||cols[1])||'').trim().replace(/^["']|["']$/g,'');
       var isoDate = parseKotakDate(dateStr);
       if(!isoDate) return;
-      txns.push({date: isoDate, desc: (cols[3]||'').trim(), amount: amt, source: 'Kotak Bank', bankCat: (cols[7]||'').trim()});
+      txns.push({date: isoDate, desc: (cols[3]||'').replace(/^["']|["']$/g,'').trim(), amount: amt, source: 'Kotak Bank', bankCat: (cols[7]||'').trim()});
     });
   }
   return txns;
@@ -2177,6 +2270,9 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
       <button onclick="closeModal('modal-import-stmt')" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--muted);">&#10005;</button>
     </div>
     <div style="font-size:13px;color:var(--muted);margin-bottom:14px;">Upload your Axis CC statement or Kotak bank statement (Excel/CSV). The app will find transactions missing from your expense records.</div>
+
+    <!-- Desktop: load expenses from sheet first -->
+    <div id="import-exp-status" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;font-size:12px;"></div>
     <!-- Source selector -->
     <div style="display:flex;gap:8px;margin-bottom:14px;">
       <div id="src-axis" onclick="setStmtSource('axis')" style="flex:1;padding:10px;border:2px solid var(--amber);border-radius:10px;text-align:center;cursor:pointer;font-size:13px;font-weight:700;background:var(--al);">&#128179; Axis CC</div>
