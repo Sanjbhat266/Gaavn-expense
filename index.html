@@ -1546,7 +1546,7 @@ function getAppsScript(){
     'function doGet(e){try{var a=e.parameter.action||"";if(a=="ping")return j({pong:true});if(a=="logExpense")return logExp(e.parameter);if(a=="getExpenses")return getExps(e.parameter);return j({error:"unknown"});}catch(err){return j({error:err.message});}}',
     'function j(o){return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);}',
     'function getSheet(date){var ss=SpreadsheetApp.openById(SS_ID);var m=(date||"").slice(0,7)||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"yyyy-MM");var name="Expenses_"+m;var sh=ss.getSheetByName(name)||ss.insertSheet(name);if(sh.getLastRow()===0){var h=["ID","Date","Party","Category","Item","State","Total","Paid","Balance","GST Mode","GST Rate","GST Amt","Base Amt","Payment","Ref","Drive Link","Description","Role","Synced"];sh.appendRow(h);sh.getRange(1,1,1,h.length).setFontWeight("bold").setBackground("#1A3A1F").setFontColor("#fff");sh.setFrozenRows(1);}return sh;}',
-    'function logExp(p){var sh=getSheet(p.date);var now=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"dd/MM/yyyy HH:mm");var row=[p.expId,p.date,p.party,p.category,p.item||"",p.state||"",+p.total||0,+p.paid||0,+p.balance||0,p.gstMode||"none",p.gstRate||"",+p.gstAmt||0,+p.baseAmt||0,p.payMethod||"",p.ref||"",p.driveLink||"",p.desc||"",p.role||"",now];var data=sh.getDataRange().getValues();for(var r=1;r<data.length;r++){if(String(data[r][0])===String(p.expId)){sh.getRange(r+1,1,1,row.length).setValues([row]);sh.getRange(r+1,1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"updated"});}}sh.appendRow(row);sh.getRange(sh.getLastRow(),1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"ok"});}',
+    'function logExp(p){var lock=LockService.getScriptLock();try{lock.waitLock(30000);}catch(e){return j({error:"busy, try again"});}try{var sh=getSheet(p.date);var now=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"dd/MM/yyyy HH:mm");var row=[p.expId,p.date,p.party,p.category,p.item||"",p.state||"",+p.total||0,+p.paid||0,+p.balance||0,p.gstMode||"none",p.gstRate||"",+p.gstAmt||0,+p.baseAmt||0,p.payMethod||"",p.ref||"",p.driveLink||"",p.desc||"",p.role||"",now];var data=sh.getDataRange().getValues();for(var r=1;r<data.length;r++){if(String(data[r][0])===String(p.expId)){sh.getRange(r+1,1,1,row.length).setValues([row]);sh.getRange(r+1,1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"updated"});}}sh.appendRow(row);sh.getRange(sh.getLastRow(),1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"ok"});}finally{lock.releaseLock();}}',
     'function getExps(p){var ss=SpreadsheetApp.openById(SS_ID);var month=p.month||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"yyyy-MM");var shName="Expenses_"+month;var sh=ss.getSheetByName(shName);if(!sh)return j({expenses:[],month:month});var data=sh.getDataRange().getValues();if(data.length<2)return j({expenses:[],month:month});var headers=data[0];var rows=data.slice(1).map(function(r){var o={};headers.forEach(function(h,i){o[h]=r[i];});return o;});return j({expenses:rows,month:month,count:rows.length});}',
   ].join('\n');
 }
@@ -1765,23 +1765,27 @@ function openImportStatement() {
   document.getElementById('stmt-processing').style.display = 'none';
   setStmtSource('axis');
 
-  // Show expense count — warn if empty (desktop with no local data)
+  // Default date range: current month
+  var now = new Date();
+  var y = now.getFullYear(), m = String(now.getMonth()+1).padStart(2,'0');
+  document.getElementById('stmt-from').value = y+'-'+m+'-01';
+  document.getElementById('stmt-to').value = y+'-'+m+'-'+new Date(y, now.getMonth()+1, 0).getDate();
+
+  // Show expense count
   var expCount = S.expenses.length;
   var statusEl = document.getElementById('import-exp-status');
   if(expCount === 0) {
-    statusEl.style.background = 'var(--rl)';
-    statusEl.style.border = '1px solid var(--red)';
-    statusEl.innerHTML = '<b style="color:var(--red);">⚠ No expenses loaded</b> — the app has no expense data on this device. '
-      + 'Load from Google Sheet first so the app can correctly find what\'s missing.<br>'
+    statusEl.style.cssText = 'margin-bottom:12px;padding:10px 12px;border-radius:8px;font-size:12px;background:var(--rl);border:1px solid var(--red);';
+    statusEl.innerHTML = '<b style="color:var(--red);">⚠ No expenses loaded</b> — Load from Sheet first so the app can find what\'s missing.<br>'
       + '<button onclick="loadExpensesFromSheet()" style="margin-top:8px;background:var(--blue);color:#fff;border:none;border-radius:8px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;">☁ Load Expenses from Sheet</button>'
       + '<span id="load-exp-progress" style="font-size:11px;color:var(--muted);margin-left:8px;"></span>';
   } else {
-    statusEl.style.background = 'var(--gl)';
-    statusEl.style.border = '1px solid var(--green)';
-    statusEl.innerHTML = '<span style="color:var(--green);">✓ <b>'+expCount+' expenses loaded</b> — ready to compare against statement.</span>';
+    statusEl.style.cssText = 'margin-bottom:12px;padding:10px 12px;border-radius:8px;font-size:12px;background:var(--gl);border:1px solid var(--green);';
+    statusEl.innerHTML = '<span style="color:var(--green);">✓ <b>'+expCount+' expenses loaded</b></span>'
+      + ' &nbsp;<button onclick="loadExpensesFromSheet()" style="background:var(--blue);color:#fff;border:none;border-radius:8px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer;">☁ Reload from Sheet</button>'
+      + '<span id="load-exp-progress" style="font-size:11px;color:var(--muted);margin-left:8px;"></span>';
   }
 
-  // Populate category dropdown
   var cats = S.cats.map(function(c){ return '<option value="'+c+'">'+c+'</option>'; }).join('');
   var ic = document.getElementById('import-category');
   if(ic) ic.innerHTML = '<option value="">Select...</option>' + cats;
@@ -1834,7 +1838,7 @@ function readXLSXWithSheetJS(file) {
       var workbook = XLSX.read(data, {type:'array', cellDates:true});
       var sheetName = workbook.SheetNames[0];
       var sheet = workbook.Sheets[sheetName];
-      // Convert to array of arrays
+      // Use raw:false so dates become ISO strings, numbers become strings — consistent across banks
       var rows = XLSX.utils.sheet_to_json(sheet, {header:1, raw:false, dateNF:'yyyy-mm-dd'});
       var txns = parseXLSXRows(rows);
       _stmtTxns = txns;
@@ -1867,13 +1871,15 @@ function parseXLSXRows(rows) {
   } else {
     // Kotak: Sl No | Transaction Date | Value Date | Description | Chq/Ref | Amount | DR/CR | Category
     rows.forEach(function(row) {
-      if(!row[5] || !row[6]) return;
-      if(String(row[6]).trim() !== 'DR') return;
-      var amt = parseFloat(String(row[5]).replace(/,/g,''));
+      // Skip header, empty rows, rows without DR/CR marker
+      if(!row || row.length < 6) return;
+      var dc = String(row[6]||'').trim();
+      if(dc !== 'DR') return;
+      // Amount
+      var amt = parseFloat(String(row[5]||0).replace(/[,\s]/g,''));
       if(isNaN(amt) || amt <= 0) return;
-      // Value date preferred (col 2), fallback to transaction date (col 1)
-      var dateVal = row[2] || row[1];
-      var isoDate = parseKotakDate(String(dateVal||'').trim());
+      // Date: Value Date (col 2) preferred, fallback Transaction Date (col 1)
+      var isoDate = parseKotakDate(row[2]) || parseKotakDate(row[1]);
       if(!isoDate) return;
       txns.push({date: isoDate, desc: String(row[3]||'').trim(), amount: amt, source: 'Kotak Bank', bankCat: String(row[7]||'').trim()});
     });
@@ -1943,13 +1949,24 @@ function parseAxisDate(str) {
   return yr+'-'+String(mon).padStart(2,'0')+'-'+String(day).padStart(2,'0');
 }
 
-function parseKotakDate(str) {
-  // "2026-05-31" or Excel date number
-  if(!str) return null;
+function parseKotakDate(val) {
+  if(!val) return null;
+  // JS Date object (fallback, when raw:true used)
+  if(typeof val === 'object' && val !== null && typeof val.getFullYear === 'function') {
+    return val.getFullYear()+'-'+String(val.getMonth()+1).padStart(2,'0')+'-'+String(val.getDate()).padStart(2,'0');
+  }
+  var str = String(val).trim();
+  // yyyy-mm-dd (SheetJS dateNF output) or ISO datetime
   if(str.match(/^\d{4}-\d{2}-\d{2}/)) return str.slice(0,10);
-  // Try d/m/yyyy
-  var m = str.match(/(\d+)\/(\d+)\/(\d{4})/);
+  // d/m/yyyy or dd/mm/yyyy
+  var m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
   if(m) return m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');
+  // Anything parseable by Date (e.g. "May 31, 2026")
+  var ts = Date.parse(str);
+  if(!isNaN(ts) && ts > 0) {
+    var d = new Date(ts);
+    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  }
   return null;
 }
 
@@ -2022,71 +2039,205 @@ function extractNEFTParty(desc) {
   return extractPartyName(desc);
 }
 
+// ── SMART MATCHING ENGINE ────────────────────────────────────────────
+// Stores learned patterns: {stmtDesc → {party, category, item, confirmed:true}}
+var LS_IMPORT_LEARN = 'gf_import_learn';
+
+function getLearnedPatterns() {
+  try { return JSON.parse(localStorage.getItem(LS_IMPORT_LEARN)||'{}'); } catch(e) { return {}; }
+}
+function saveLearnedPattern(stmtDesc, party, category, item) {
+  var patterns = getLearnedPatterns();
+  // Key: first 30 chars of desc normalized (handles slight variations)
+  var key = normalizeDescKey(stmtDesc);
+  patterns[key] = {party: party, category: category, item: item, confirmed: true, count: (patterns[key]?.count||0)+1};
+  localStorage.setItem(LS_IMPORT_LEARN, JSON.stringify(patterns));
+}
+function lookupLearnedPattern(stmtDesc) {
+  var patterns = getLearnedPatterns();
+  var key = normalizeDescKey(stmtDesc);
+  // Exact key match
+  if(patterns[key]) return patterns[key];
+  // Fuzzy: check if any learned key is a substring of this desc or vice versa
+  var descLower = stmtDesc.toLowerCase();
+  for(var k in patterns) {
+    if(descLower.includes(k) || k.includes(descLower.slice(0,20))) return patterns[k];
+  }
+  return null;
+}
+function normalizeDescKey(desc) {
+  return desc.toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,25);
+}
+
 function matchAndShowResults(txns) {
-  // Build a set of existing expenses for matching
-  // Match by: date + amount (within ±1 rupee)
-  var matched = [], missing = [], skipped = [];
+  // Apply date range filter
+  var fromDate = document.getElementById('stmt-from').value;
+  var toDate   = document.getElementById('stmt-to').value;
+  if(fromDate || toDate) {
+    txns = txns.filter(function(t) {
+      if(fromDate && t.date < fromDate) return false;
+      if(toDate   && t.date > toDate)   return false;
+      return true;
+    });
+  }
+  var exactMatched = [], probableMatched = [], missing = [], skipped = [];
+  var learned = getLearnedPatterns();
 
   txns.forEach(function(txn) {
     var autoInfo = autoCategorizeTxn(txn.desc, txn.amount);
-    if(!autoInfo) { skipped.push(txn); return; } // bank charges etc
+    if(!autoInfo) { skipped.push(txn); return; }
 
-    // Check if this transaction already exists in expenses
-    var found = S.expenses.some(function(e) {
-      var sameDate = e.date === txn.date;
-      var sameAmt  = Math.abs((e.total||0) - txn.amount) < 2;
-      return sameDate && sameAmt;
+    // TIER 1: Exact match — same date + same amount in expenses
+    var exactMatch = S.expenses.find(function(e) {
+      return e.date === txn.date && Math.abs((e.total||0) - txn.amount) < 2;
     });
-
-    if(found) {
-      matched.push(txn);
-    } else {
-      txn.autoCat   = autoInfo.cat;
-      txn.autoParty = autoInfo.party;
-      txn.autoItem  = autoInfo.item;
-      missing.push(txn);
+    if(exactMatch) {
+      txn.matchType = 'exact';
+      txn.matchedExp = exactMatch;
+      exactMatched.push(txn);
+      return;
     }
+
+    // TIER 2: Learned pattern match — we've seen this desc before and confirmed it
+    var learnedMatch = lookupLearnedPattern(txn.desc);
+    if(learnedMatch) {
+      // Check if there's an expense with same amount (any date ±3 days) using learned party
+      var approxMatch = S.expenses.find(function(e) {
+        var dayDiff = Math.abs(new Date(e.date) - new Date(txn.date)) / 86400000;
+        return dayDiff <= 3 && Math.abs((e.total||0) - txn.amount) < 2;
+      });
+      if(approxMatch) {
+        txn.matchType = 'learned';
+        txn.matchedExp = approxMatch;
+        txn.learnedInfo = learnedMatch;
+        exactMatched.push(txn); // treat as matched
+        return;
+      }
+    }
+
+    // TIER 3: Probable match — same amount on same date but no party match
+    // (different station name in desc vs driver name in app)
+    var probableMatch = S.expenses.find(function(e) {
+      var sameAmt = Math.abs((e.total||0) - txn.amount) < 2;
+      var dayDiff = Math.abs(new Date(e.date) - new Date(txn.date)) / 86400000;
+      return sameAmt && dayDiff === 0; // exact same date, same amount
+    });
+    if(probableMatch) {
+      txn.matchType = 'probable';
+      txn.matchedExp = probableMatch;
+      txn.autoCat   = autoInfo.cat || probableMatch.category;
+      txn.autoParty = autoInfo.party;
+      txn.autoItem  = autoInfo.item || probableMatch.item;
+      probableMatched.push(txn);
+      return;
+    }
+
+    // TIER 4: Amount-only match — same amount within 3 days, no date match
+    var amountMatch = S.expenses.find(function(e) {
+      var sameAmt = Math.abs((e.total||0) - txn.amount) < 2;
+      var dayDiff = Math.abs(new Date(e.date) - new Date(txn.date)) / 86400000;
+      return sameAmt && dayDiff <= 3 && dayDiff > 0;
+    });
+    if(amountMatch) {
+      txn.matchType = 'amount_nearby';
+      txn.matchedExp = amountMatch;
+      txn.autoCat   = autoInfo.cat || amountMatch.category;
+      txn.autoParty = autoInfo.party;
+      txn.autoItem  = autoInfo.item || amountMatch.item;
+      probableMatched.push(txn);
+      return;
+    }
+
+    // TIER 5: Truly missing
+    txn.matchType = 'missing';
+    txn.autoCat   = autoInfo.cat;
+    txn.autoParty = autoInfo.party;
+    txn.autoItem  = autoInfo.item;
+    missing.push(txn);
   });
 
-  _missingTxns = missing;
+  // Combine probable + missing for review
+  _missingTxns = probableMatched.concat(missing);
   document.getElementById('stmt-processing').style.display = 'none';
 
-  // Show summary
+  // Summary
   var summaryHtml =
-    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;">' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:12px;">' +
     '<div class="summary-chip"><div class="chip-val">'+txns.length+'</div><div class="chip-lbl">Total</div></div>' +
-    '<div class="summary-chip"><div class="chip-val" style="color:var(--green);">'+matched.length+'</div><div class="chip-lbl">Matched</div></div>' +
-    '<div class="summary-chip"><div class="chip-val" style="color:var(--red);">'+missing.length+'</div><div class="chip-lbl">Missing</div></div>' +
+    '<div class="summary-chip"><div class="chip-val" style="color:var(--green);">'+exactMatched.length+'</div><div class="chip-lbl">✓ Matched</div></div>' +
+    '<div class="summary-chip"><div class="chip-val" style="color:var(--amber);">'+probableMatched.length+'</div><div class="chip-lbl">? Probable</div></div>' +
+    '<div class="summary-chip"><div class="chip-val" style="color:var(--red);">'+missing.length+'</div><div class="chip-lbl">✗ Missing</div></div>' +
     '</div>';
-  if(skipped.length) summaryHtml += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">'+skipped.length+' bank charges/surcharges skipped automatically</div>';
+  if(skipped.length) summaryHtml += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">'+skipped.length+' bank charges skipped</div>';
   document.getElementById('stmt-summary').innerHTML = summaryHtml;
 
-  // Show missing transactions
-  if(!missing.length) {
+  // Bulk action buttons
+  var bulkHtml = '';
+  var probableCount = _missingTxns.filter(function(t){ return t.matchType==='probable'||t.matchType==='amount_nearby'; }).length;
+  var truesMissingCount = _missingTxns.filter(function(t){ return t.matchType==='missing'; }).length;
+  if(probableCount > 0) {
+    bulkHtml += '<button onclick="confirmAllProbable()" class="btn btn-amber btn-sm" style="flex:1;">✓ Confirm All '+probableCount+' Probable</button>';
+  }
+  if(truesMissingCount > 0) {
+    bulkHtml += '<button onclick="importAllMissing()" class="btn btn-primary btn-sm" style="flex:1;">+ Add All '+truesMissingCount+' Missing</button>';
+  }
+  document.getElementById('stmt-bulk-actions').innerHTML = bulkHtml;
+
+  if(!_missingTxns.length) {
     document.getElementById('stmt-missing-list').innerHTML =
-      '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">All transactions already in app!</div></div>';
-  } else {
-    var html = '<div style="font-size:12px;font-weight:700;color:var(--red);margin-bottom:8px;">'+missing.length+' MISSING TRANSACTIONS — tap each to review &amp; add:</div>';
-    missing.forEach(function(txn, i) {
-      var catBadge = txn.autoCat
-        ? '<span style="background:var(--gl);color:var(--green);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700;margin-left:6px;">'+txn.autoCat+'</span>'
-        : '<span style="background:var(--al);color:var(--amber);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700;margin-left:6px;">Needs category</span>';
-      html += '<div onclick="reviewImportItem('+i+')" style="background:var(--surface);border:1.5px solid '+(txn.autoCat?'var(--border)':'var(--amber)')+';border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;" id="missing-item-'+i+'">' +
-        '<div style="display:flex;justify-content:space-between;align-items:flex-start;">' +
-        '<div style="flex:1;min-width:0;">' +
-        '<div style="font-size:13px;font-weight:700;margin-bottom:2px;">'+(txn.autoParty||txn.desc.slice(0,40))+'</div>' +
-        '<div style="font-size:11px;color:var(--muted);">'+txn.date+'&nbsp;·&nbsp;'+txn.source+'</div>' +
-        '<div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+txn.desc.slice(0,50)+'</div>' +
-        '</div>' +
-        '<div style="text-align:right;flex-shrink:0;margin-left:10px;">' +
-        '<div style="font-size:15px;font-weight:700;color:var(--amber);">'+fmtM(txn.amount)+'</div>' +
-        catBadge +
-        '</div></div>' +
-      '</div>';
-    });
-    document.getElementById('stmt-missing-list').innerHTML = html;
+      '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">All transactions matched!</div></div>';
+    document.getElementById('stmt-results').style.display = 'block';
+    return;
   }
 
+  var html = '';
+  // Show probable matches first (need confirmation)
+  if(probableMatched.length) {
+    html += '<div style="font-size:12px;font-weight:700;color:var(--amber);margin-bottom:8px;padding:6px 10px;background:var(--al);border-radius:8px;">🔍 '+probableMatched.length+' PROBABLE MATCHES — same amount found, different name. Please confirm:</div>';
+  }
+  _missingTxns.forEach(function(txn, i) {
+    var isProbable = txn.matchType === 'probable' || txn.matchType === 'amount_nearby';
+    var borderColor = isProbable ? 'var(--amber)' : (txn.autoCat ? 'var(--border)' : 'var(--red)');
+    var badge = '';
+    if(isProbable) {
+      var dayDiff = txn.matchType === 'amount_nearby'
+        ? Math.round(Math.abs(new Date(txn.matchedExp.date) - new Date(txn.date)) / 86400000)
+        : 0;
+      badge = '<div style="background:var(--al);border:1px solid var(--amber);border-radius:8px;padding:5px 8px;margin-top:6px;font-size:11px;">'
+        + '🔍 <b style="color:var(--amber);">Looks like it\'s already in app</b> — '
+        + (dayDiff > 0 ? dayDiff+' day'+(dayDiff>1?'s':'')+' apart · ' : 'same date · ')
+        + '<b>'+txn.matchedExp.party+'</b> · ₹'+fmtM(txn.matchedExp.total)+' · '+txn.matchedExp.category
+        + '<br><span style="color:var(--muted);">Different name in app (driver) vs statement (station)</span>'
+        + '</div>';
+    } else if(txn.autoCat) {
+      badge = '<span style="background:var(--gl);color:var(--green);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700;margin-left:6px;">'+txn.autoCat+'</span>';
+    } else {
+      badge = '<span style="background:var(--rl);color:var(--red);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700;margin-left:6px;">Needs category</span>';
+    }
+
+    // Separator between probable and missing
+    if(i === probableMatched.length && missing.length) {
+      html += '<div style="font-size:12px;font-weight:700;color:var(--red);margin:12px 0 8px;padding:6px 10px;background:var(--rl);border-radius:8px;">✗ '+missing.length+' MISSING — not found in app:</div>';
+    }
+
+    html += '<div onclick="reviewImportItem('+i+')" id="missing-item-'+i+'"'
+      + ' style="background:var(--surface);border:1.5px solid '+borderColor+';border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;">'
+      + '<div style="flex:1;min-width:0;">'
+      + '<div style="font-size:13px;font-weight:700;margin-bottom:2px;">'+(txn.autoParty||txn.desc.slice(0,40))
+      + (isProbable ? '' : (txn.autoCat ? ' <span style="background:var(--gl);color:var(--green);border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700;">'+txn.autoCat+'</span>' : ''))
+      + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);">'+txn.date+'&nbsp;·&nbsp;'+txn.source+'</div>'
+      + '<div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+txn.desc.slice(0,55)+'</div>'
+      + (isProbable ? badge : '')
+      + '</div>'
+      + '<div style="text-align:right;flex-shrink:0;margin-left:10px;padding-top:2px;">'
+      + '<div style="font-size:15px;font-weight:700;color:var(--amber);">'+fmtM(txn.amount)+'</div>'
+      + (isProbable ? '<div style="font-size:10px;color:var(--amber);font-weight:700;">? CONFIRM</div>' : '')
+      + '</div></div></div>';
+  });
+
+  document.getElementById('stmt-missing-list').innerHTML = html;
   document.getElementById('stmt-results').style.display = 'block';
 }
 
@@ -2095,31 +2246,82 @@ function reviewImportItem(idx) {
 }
 
 function openImportItemAt(idx) {
-  // Find next non-ignored, non-done item if current is processed
   var txn = _missingTxns[idx];
   if(!txn) return;
   document.getElementById('import-item-idx').value = idx;
   document.getElementById('import-item-counter').textContent = (idx+1) + ' of ' + _missingTxns.length;
   document.getElementById('import-item-desc').textContent = txn.desc;
-  document.getElementById('import-item-meta').textContent = txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN') + ' · ' + txn.source;
   document.getElementById('import-party').value = txn.autoParty || '';
   document.getElementById('import-item-name').value = txn.autoItem || '';
   document.getElementById('import-amount').value = txn.amount;
   document.getElementById('import-date').value = txn.date;
-  // Populate and set category
+
+  // Populate category
   var cats = S.cats.map(function(c){ return '<option value="'+c+'">'+c+'</option>'; }).join('');
   document.getElementById('import-category').innerHTML = '<option value="">Select...</option>' + cats;
   document.getElementById('import-category').value = txn.autoCat || '';
-  // Show status if already processed
+
+  // Build meta / probable match display
   var meta = document.getElementById('import-item-meta');
+  var isProbable = txn.matchType === 'probable' || txn.matchType === 'amount_nearby';
+
   if(txn._done) {
-    meta.innerHTML = '<span style="color:var(--green);font-weight:700;">✓ Added</span> · ' + txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN');
+    meta.innerHTML = '<span style="color:var(--green);font-weight:700;">✓ Added</span> · '+txn.date+' · ₹'+txn.amount.toLocaleString('en-IN');
   } else if(txn._ignored) {
-    meta.innerHTML = '<span style="color:var(--red);font-weight:700;">✕ Ignored (already in app)</span> · ' + txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN');
+    meta.innerHTML = '<span style="color:var(--red);font-weight:700;">✕ Confirmed already in app</span> · '+txn.date+' · ₹'+txn.amount.toLocaleString('en-IN');
+  } else if(isProbable && txn.matchedExp) {
+    var e = txn.matchedExp;
+    var dayDiff = Math.round(Math.abs(new Date(e.date) - new Date(txn.date)) / 86400000);
+    meta.innerHTML = txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN') + ' · ' + txn.source
+      + '<div style="margin-top:8px;background:var(--al);border:1.5px solid var(--amber);border-radius:8px;padding:8px 10px;font-size:12px;">'
+      + '<div style="font-weight:700;color:var(--amber);margin-bottom:4px;">🔍 Looks like it\'s already recorded as:</div>'
+      + '<div><b>'+e.party+'</b> · ₹'+fmtM(e.total)+' · '+e.category+(e.item?' · '+e.item:'')+' · '+e.date+'</div>'
+      + (dayDiff > 0 ? '<div style="color:var(--muted);margin-top:2px;font-size:11px;">Note: date differs by '+dayDiff+' day'+(dayDiff>1?'s':'')+' — driver may have recorded differently</div>' : '')
+      + '<div style="margin-top:8px;display:flex;gap:6px;">'
+      + '<button onclick="confirmProbableMatch('+idx+')" style="flex:1;background:var(--green);color:#fff;border:none;border-radius:8px;padding:7px;font-size:12px;font-weight:700;cursor:pointer;">✓ Yes, same payment</button>'
+      + '<button onclick="denyProbableMatch('+idx+')" style="flex:1;background:var(--red);color:#fff;border:none;border-radius:8px;padding:7px;font-size:12px;font-weight:700;cursor:pointer;">✗ No, different — add it</button>'
+      + '</div></div>';
   } else {
     meta.textContent = txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN') + ' · ' + txn.source;
   }
+
   openModal('modal-import-item');
+}
+
+// Confirm: this statement txn IS the same as the matched expense — learn & skip
+function confirmProbableMatch(idx) {
+  var txn = _missingTxns[idx];
+  if(!txn) return;
+  // Learn: this description pattern maps to this category/item
+  if(txn.matchedExp) {
+    saveLearnedPattern(txn.desc, txn.matchedExp.party, txn.matchedExp.category, txn.matchedExp.item||'');
+  }
+  txn._ignored = true;
+  txn._confirmed = true;
+  // Update card
+  var el = document.getElementById('missing-item-'+idx);
+  if(el) {
+    el.style.background = 'var(--gl)';
+    el.style.border = '1.5px solid var(--green)';
+    el.innerHTML = '<div style="font-size:13px;"><span style="color:var(--green);font-weight:700;">✓ Confirmed — already in app</span> · '+txn.amount.toLocaleString('en-IN')+' · Pattern learned for next time</div>';
+  }
+  showToast('✓ Confirmed — pattern learned');
+  // Advance to next
+  var next = idx + 1;
+  while(next < _missingTxns.length && (_missingTxns[next]._done || _missingTxns[next]._ignored)) next++;
+  if(next < _missingTxns.length) openImportItemAt(next);
+  else { closeModal('modal-import-item'); showToast('All items reviewed!'); }
+}
+
+// Deny: this is actually a different transaction — add it to app
+function denyProbableMatch(idx) {
+  var txn = _missingTxns[idx];
+  if(!txn) return;
+  txn.matchType = 'missing'; // treat as new missing item
+  // Refresh the modal without the probable match UI
+  var meta = document.getElementById('import-item-meta');
+  meta.textContent = txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN') + ' · ' + txn.source;
+  showToast('OK — add it as a new expense below');
 }
 
 function prevImportItem() {
@@ -2177,6 +2379,32 @@ function saveImportItem() {
 
   var pm = S.pm.find(function(p){ return p.name === (_stmtSource==='axis'?'Credit Card':'Kotak Bank') || p.type === (_stmtSource==='axis'?'credit_card':'bank'); });
 
+  // Duplicate guard: import paths mint a fresh time-based id every run, so
+  // without this check re-importing a statement appends fresh duplicates.
+  var importDup = S.expenses.some(function(e){
+    return e.date===date
+      && (e.party||'').toLowerCase()===party.toLowerCase()
+      && e.total===amount;
+  });
+  if(importDup){
+    if(!confirm('Already recorded:\n  '+party+' \u00b7 '+fmtM(amount)+' \u00b7 '+date+'\n\nThis expense already exists. Add it again anyway?')){
+      var txnD = _missingTxns[idx];
+      if(txnD){ saveLearnedPattern(txnD.desc, party, cat, item); txnD._done = true; }
+      var elD = document.getElementById('missing-item-'+idx);
+      if(elD){
+        elD.style.cssText = 'background:#E8F5E9;border:1.5px solid var(--green);border-radius:10px;padding:10px 12px;margin-bottom:8px;opacity:0.7;';
+        elD.innerHTML = '<div style=\"display:flex;align-items:center;gap:8px;\"><span style=\"color:var(--green);font-size:16px;\">\u2713</span><span style=\"font-size:13px;font-weight:600;color:var(--green);\">Already in app: '+party+' \u00b7 '+fmtM(amount)+'</span></div>';
+        elD.onclick = function(){ openImportItemAt(idx); };
+      }
+      showToast('Skipped duplicate: '+party+' '+fmtM(amount));
+      var nextD = idx + 1;
+      while(nextD < _missingTxns.length && (_missingTxns[nextD]._done || _missingTxns[nextD]._ignored)) nextD++;
+      if(nextD < _missingTxns.length) openImportItemAt(nextD);
+      else { closeModal('modal-import-item'); showToast('All items reviewed!'); }
+      return;
+    }
+  }
+
   var exp = {
     id: 'EXP'+Date.now().toString().slice(-10),
     date: date, party: party, category: cat, item: item,
@@ -2191,8 +2419,12 @@ function saveImportItem() {
   localStorage.setItem(LS_EXP, JSON.stringify(S.expenses));
   syncToSheet(exp);
 
-  // Mark txn as done
-  if(_missingTxns[idx]) _missingTxns[idx]._done = true;
+  // Learn: this description pattern maps to this party/category
+  var txn = _missingTxns[idx];
+  if(txn) {
+    saveLearnedPattern(txn.desc, party, cat, item);
+    txn._done = true;
+  }
 
   // Update card in list
   var el = document.getElementById('missing-item-'+idx);
@@ -2216,10 +2448,46 @@ function skipImportItem() {
   closeModal('modal-import-item');
 }
 
+function confirmAllProbable() {
+  var confirmed = 0;
+  _missingTxns.forEach(function(txn, idx) {
+    if(txn._done || txn._ignored) return;
+    if(txn.matchType !== 'probable' && txn.matchType !== 'amount_nearby') return;
+    // Learn the pattern
+    if(txn.matchedExp) {
+      saveLearnedPattern(txn.desc, txn.matchedExp.party, txn.matchedExp.category, txn.matchedExp.item||'');
+    }
+    txn._ignored = true;
+    txn._confirmed = true;
+    var el = document.getElementById('missing-item-'+idx);
+    if(el) {
+      el.style.background = 'var(--gl)';
+      el.style.border = '1.5px solid var(--green)';
+      el.style.opacity = '0.7';
+      el.innerHTML = '<div style="font-size:12px;color:var(--green);font-weight:600;">✓ Confirmed already in app · Pattern learned</div>';
+    }
+    confirmed++;
+  });
+  // Refresh bulk buttons
+  var truesMissingCount = _missingTxns.filter(function(t){ return t.matchType==='missing' && !t._done && !t._ignored; }).length;
+  var bulkEl = document.getElementById('stmt-bulk-actions');
+  if(bulkEl) bulkEl.innerHTML = truesMissingCount > 0
+    ? '<button onclick="importAllMissing()" class="btn btn-primary btn-sm" style="flex:1;">+ Add All '+truesMissingCount+' Missing</button>'
+    : '';
+  showToast('✓ Confirmed '+confirmed+' as already in app — patterns learned');
+}
+
 function importAllMissing() {
   var added = 0;
   _missingTxns.forEach(function(txn, idx) {
     if(!txn.autoCat || !txn.autoParty) return; // skip if no auto-category
+    // Duplicate guard: skip transactions already recorded (prevents re-import dupes)
+    var already = S.expenses.some(function(e){
+      return e.date===txn.date
+        && (e.party||'').toLowerCase()===(txn.autoParty||'').toLowerCase()
+        && e.total===txn.amount;
+    });
+    if(already){ var elS=document.getElementById('missing-item-'+idx); if(elS) elS.style.opacity='0.4'; txn._ignored=true; return; }
     var pm = S.pm.find(function(p){ return p.name === (_stmtSource==='axis'?'Credit Card':'Kotak Bank'); });
     var exp = {
       id: 'EXP'+Date.now().toString().slice(-10)+(added++),
@@ -2269,25 +2537,40 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
       <div class="modal-title" style="margin-bottom:0;">&#128196; Import Statement</div>
       <button onclick="closeModal('modal-import-stmt')" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--muted);">&#10005;</button>
     </div>
-    <div style="font-size:13px;color:var(--muted);margin-bottom:14px;">Upload your Axis CC statement or Kotak bank statement (Excel/CSV). The app will find transactions missing from your expense records.</div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:14px;">Upload your Axis CC or Kotak bank statement. <b>Use the original Excel (.xlsx) file</b>.</div>
 
-    <!-- Desktop: load expenses from sheet first -->
+    <!-- Load from sheet status -->
     <div id="import-exp-status" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;font-size:12px;"></div>
+
     <!-- Source selector -->
-    <div style="display:flex;gap:8px;margin-bottom:14px;">
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
       <div id="src-axis" onclick="setStmtSource('axis')" style="flex:1;padding:10px;border:2px solid var(--amber);border-radius:10px;text-align:center;cursor:pointer;font-size:13px;font-weight:700;background:var(--al);">&#128179; Axis CC</div>
       <div id="src-kotak" onclick="setStmtSource('kotak')" style="flex:1;padding:10px;border:1.5px solid var(--border);border-radius:10px;text-align:center;cursor:pointer;font-size:13px;font-weight:700;color:var(--muted);">&#127968; Kotak Bank</div>
     </div>
+
+    <!-- Date range filter -->
+    <div style="margin-bottom:12px;">
+      <label class="form-label">Filter by Date Range</label>
+      <div class="form-row">
+        <input type="date" class="form-input" id="stmt-from" placeholder="From date">
+        <input type="date" class="form-input" id="stmt-to" placeholder="To date">
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px;">Leave blank to include all dates in the statement</div>
+    </div>
+
+    <!-- File upload -->
     <div class="form-group">
       <label class="form-label">Upload File (Excel or CSV)</label>
       <input type="file" id="stmt-file-input" accept=".xlsx,.xls,.csv" class="form-input" style="padding:8px;" onchange="processStatementFile(this)">
     </div>
+
     <div id="stmt-processing" style="display:none;text-align:center;padding:20px;color:var(--muted);font-size:13px;">&#9203; Processing file...</div>
     <div id="stmt-results" style="display:none;">
       <div id="stmt-summary" style="margin-bottom:14px;"></div>
+      <!-- Bulk action buttons -->
+      <div id="stmt-bulk-actions" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;"></div>
       <div id="stmt-missing-list"></div>
-      <div style="margin-top:14px;display:flex;gap:8px;">
-        <button class="btn btn-primary" onclick="importAllMissing()">&#10003; Add All Missing</button>
+      <div style="margin-top:14px;">
         <button class="btn btn-secondary" onclick="closeModal('modal-import-stmt')">Done</button>
       </div>
     </div>
