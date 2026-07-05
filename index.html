@@ -165,7 +165,7 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
-      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v24</span>
+      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v25</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
@@ -576,6 +576,7 @@ datalist{display:none;}
 
 <script>
 var LS_EXP='gf_exp',LS_CAT='gf_cat',LS_ITEMS='gf_items',LS_PARTIES='gf_parties',LS_PM='gf_pm',LS_URL='gf_url',LS_PINS='gf_pins';
+var DEFAULT_URL='https://script.google.com/macros/s/AKfycbxLwidPHSJF5VdrbfoWTNlkPN_kDYY-7peVJqUpevt4I-2tCOTmNmob83D6hge1AVrt/exec';
 var DEFAULT_CATS=['CAPEX','CNG','CONSUMABLES','DIESEL','ELECTRIC BILL','FOOD & TEA','GAS CYLINDER','GST','INCENTIVES','INTERNAL TRANSFER','LEGAL','LOAN','MARKETING','PACKING MATERIALS','PETROL','RAW MATERIAL','RENT','REPAIR MAINTENANCE','SALARY','TRANSPORT','TRAVEL AND STAY','WOOD FUEL'];
 var DEFAULT_PM=[{id:'pm1',name:'Cash',type:'cash'},{id:'pm2',name:'Kotak Bank',type:'bank'},{id:'pm3',name:'HDFC Bank',type:'bank'},{id:'pm4',name:'Credit Card',type:'card'}];
 var PICONS={bank:'&#127970;',card:'&#128179;',cash:'&#128181;',upi:'&#128241;',other:'&#128176;'};
@@ -593,7 +594,8 @@ function _init(){
     localStorage.setItem(LS_PARTIES,JSON.stringify(S.parties));
   }
   S.pm=JSON.parse(localStorage.getItem(LS_PM)||'null')||DEFAULT_PM.map(function(p){return Object.assign({},p);});
-  S.url=localStorage.getItem(LS_URL)||'';
+  S.url=localStorage.getItem(LS_URL)||DEFAULT_URL;
+  if(!localStorage.getItem(LS_URL)&&DEFAULT_URL)localStorage.setItem(LS_URL,DEFAULT_URL);
   document.getElementById('exp-date').value=todayStr();
   document.getElementById('rpt-from').value=monthStart();
   document.getElementById('rpt-to').value=todayStr();
@@ -2794,9 +2796,4 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
     </div>
     <div style="display:flex;gap:8px;margin-top:8px;">
       <button class="btn btn-secondary" onclick="closeModal('modal-import-item')" style="flex:1;">Close</button>
-      <button class="btn btn-primary" onclick="saveImportItem()" style="flex:1;">✓ Add Expense</button>
-    </div>
-  </div>
-</div>
-</body>
-</html>
+      <button class="btn btn-primary"
