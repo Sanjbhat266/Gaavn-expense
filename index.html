@@ -1815,14 +1815,36 @@ async function loadExpensesFromSheet() {
               driveLink: row['Drive Link']||row[15]||'',
               desc: row['Description']||row[16]||'',
             });
+            var pname=(row['Party']||row[2]||'').trim();
+            if(pname && !S.parties.find(function(p){return (p.name||'').toLowerCase()===pname.toLowerCase();})){
+              S.parties.push({id:'p'+Date.now().toString().slice(-8)+Math.random().toString(36).slice(2,5),name:pname,gst:'',address:'',phone:'',email:'',contact:'',createdAt:Date.now()});
+            }
             loaded++;
           });
         }
       } catch(e) {}
     }
 
+    // Backfill party suggestions from every known expense (covers rows that
+    // were imported earlier and skipped by the de-dup check above), so paying
+    // an existing customer shows their name in the party dropdown.
+    var _pchg=false;
+    S.expenses.forEach(function(e){
+      var pn=(e.party||'').trim();
+      if(pn && !S.parties.find(function(p){return (p.name||'').toLowerCase()===pn.toLowerCase();})){
+        S.parties.push({id:'p'+Date.now().toString().slice(-8)+Math.random().toString(36).slice(2,5),name:pn,gst:'',address:'',phone:'',email:'',contact:'',createdAt:Date.now()});
+        _pchg=true;
+      }
+    });
+    if(_pchg){
+      S.parties.sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});
+      localStorage.setItem(LS_PARTIES, JSON.stringify(S.parties));
+    }
+
     if(loaded > 0) {
       localStorage.setItem(LS_EXP, JSON.stringify(S.expenses));
+      S.parties.sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});
+      localStorage.setItem(LS_PARTIES, JSON.stringify(S.parties));
       if(prog) prog.textContent = '✓ '+loaded+' expenses loaded!';
       // Refresh the status banner
       var statusEl = document.getElementById('import-exp-status');
