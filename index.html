@@ -1074,9 +1074,20 @@ function showPartyDropdown(val){
   var dd=document.getElementById('party-dropdown');
   if(!dd) return;
   var filter=(val||'').toLowerCase();
-  var matches=S.parties.filter(function(p){
-    return !filter || p.name.toLowerCase().indexOf(filter)>=0;
+  // Candidates = saved parties + any party seen in expenses (so imported
+  // customers are suggested even if they were never added as a party).
+  var cand=S.parties.slice();
+  var seen={};
+  cand.forEach(function(p){seen[(p.name||'').toLowerCase()]=true;});
+  S.expenses.forEach(function(e){
+    var nm=(e.party||'').trim();
+    if(nm && !seen[nm.toLowerCase()]){seen[nm.toLowerCase()]=true;cand.push({name:nm,gst:'',phone:''});}
   });
+  var matches=cand.filter(function(p){
+    return !filter || (p.name||'').toLowerCase().indexOf(filter)>=0;
+  });
+  matches.sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});
+  if(matches.length>30)matches=matches.slice(0,30);
   if(!matches.length){dd.style.display='none';return;}
   dd.innerHTML=matches.map(function(p){
     var details=[];
@@ -1110,7 +1121,8 @@ function onPartyInput(val){
   // Refresh dropdown as user types
   showPartyDropdown(trimmed);
   if(!trimmed){if(btn)btn.style.display='none';if(chip)chip.style.display='none';return;}
-  var match=S.parties.find(function(p){return p.name.toLowerCase()===trimmed.toLowerCase();});
+  var match=S.parties.find(function(p){return p.name.toLowerCase()===trimmed.toLowerCase();})
+    ||(S.expenses.some(function(e){return (e.party||'').toLowerCase()===trimmed.toLowerCase();})?{name:trimmed,gst:'',address:'',phone:''}:null);
   if(match){
     if(btn)btn.style.display='none';
     if(chip){
