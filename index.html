@@ -165,6 +165,7 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
+      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v24</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
@@ -1805,6 +1806,7 @@ async function loadExpensesFromSheet() {
     }
 
     var loaded = 0;
+    var _pmchg=false;
     for(var mi=0; mi<months.length; mi++) {
       var month = months[mi];
       try {
@@ -1814,7 +1816,13 @@ async function loadExpensesFromSheet() {
           json.expenses.forEach(function(row) {
             var id = row['ID'] || row[0];
             if(!id || S.expenses.find(function(e){return e.id===id;})) return;
-            var pm = S.pm.find(function(p){return p.name===(row['Payment']||row[13]);});
+            var _payName=(row['Payment']||row[13]||'').trim();
+            var pm = S.pm.find(function(p){return (p.name||'').toLowerCase()===_payName.toLowerCase();});
+            if(!pm && _payName){
+              var _t=/cash/i.test(_payName)?'cash':(/card|cc|credit/i.test(_payName)?'card':(/bank|upi|gpay|phonepe|paytm/i.test(_payName)?'bank':'other'));
+              pm={id:'pm'+Date.now().toString().slice(-6)+Math.random().toString(36).slice(2,5),name:_payName,type:_t};
+              S.pm.push(pm); _pmchg=true;
+            }
             S.expenses.push({
               id: id,
               date: (row['Date']||row[1]||'').slice(0,10),
@@ -1858,6 +1866,28 @@ async function loadExpensesFromSheet() {
     if(_pchg){
       S.parties.sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});
       localStorage.setItem(LS_PARTIES, JSON.stringify(S.parties));
+    }
+
+    // Persist any payment methods discovered during import (created above).
+    if(typeof _pmchg!=='undefined' && _pmchg){
+      localStorage.setItem(LS_PM, JSON.stringify(S.pm));
+      if(typeof populatePMDropdown==='function') populatePMDropdown();
+    }
+
+    // Backfill CATEGORIES from every known expense, so categories that only
+    // exist in imported data (e.g. "ADMIN CONSUMABLES") appear in the dropdown.
+    var _cchg=false;
+    S.expenses.forEach(function(e){
+      var cn=(e.category||'').trim();
+      if(cn && !S.cats.some(function(c){return (c||'').toLowerCase()===cn.toLowerCase();})){
+        S.cats.push(cn);
+        _cchg=true;
+      }
+    });
+    if(_cchg){
+      S.cats.sort();
+      localStorage.setItem(LS_CAT, JSON.stringify(S.cats));
+      if(typeof populateCatDropdown==='function') populateCatDropdown();
     }
 
     if(loaded > 0) {
