@@ -170,6 +170,11 @@ datalist{display:none;}
   </div>
 
   <div class="screen active main" id="screen-dashboard">
+    <div style="margin-bottom:10px;">
+      <input type="search" id="dash-search" placeholder="\U0001F50D  Search item, party, category, invoice #..." oninput="onDashSearch()" class="form-input" style="width:100%;">
+    </div>
+    <div id="dash-search-results" style="display:none;"></div>
+    <input type="file" id="quick-attach-file" accept="image/*,application/pdf" style="display:none;" onchange="onQuickAttachFile(this)">
     <div class="summary-row" id="dash-summary"></div>
     <div class="filter-bar" id="dash-filter-bar">
       <div class="filter-chip active" onclick="setDashFilter('all',this)">All</div>
@@ -393,8 +398,10 @@ datalist{display:none;}
         <input type="text" class="form-input" id="exp-ref" placeholder="Invoice / Receipt #">
       </div>
       <div class="form-group">
-        <label class="form-label">Drive Link (Slip)</label>
-        <input type="url" class="form-input" id="exp-drive" placeholder="https://drive.google.com/...">
+        <label class="form-label">Invoice / Warranty / Slip</label>
+        <input type="url" class="form-input" id="exp-drive" placeholder="Drive link (auto-filled on upload)">
+        <input type="file" id="exp-file" accept="image/*,application/pdf" style="margin-top:6px;font-size:12px;width:100%;" onchange="uploadExpenseDoc(this)">
+        <div id="exp-file-status" style="font-size:11px;color:var(--muted);margin-top:4px;"></div>
       </div>
     </div>
     <div style="display:flex;gap:10px;margin-top:8px;">
@@ -687,6 +694,92 @@ function getFilteredExp(){
   });
 }
 
+function onDashSearch(){
+  var q=(document.getElementById('dash-search').value||'').trim().toLowerCase();
+  var resEl=document.getElementById('dash-search-results');
+  var listEl=document.getElementById('dash-expenses');
+  var filterEl=document.getElementById('dash-filter-bar');
+  var sumEl=document.getElementById('dash-summary');
+  if(!q){ resEl.style.display='none'; resEl.innerHTML=''; listEl.style.display=''; if(filterEl)filterEl.style.display=''; if(sumEl)sumEl.style.display=''; return; }
+  listEl.style.display='none'; if(filterEl)filterEl.style.display='none'; if(sumEl)sumEl.style.display='none';
+  var matches=S.expenses.filter(function(e){
+    return [e.party,e.category,e.item,e.desc,e.ref].some(function(f){return (f||'').toLowerCase().indexOf(q)>=0;});
+  });
+  matches.sort(function(a,b){return (b.date||'').localeCompare(a.date||'');});
+  if(!matches.length){ resEl.innerHTML='<div class="empty"><div class="empty-icon">\U0001F50D</div><div class="empty-text">No matches for “'+q+'”.</div></div>'; resEl.style.display=''; return; }
+  var tot=matches.reduce(function(s,e){return s+(e.total||0);},0);
+  var bal=matches.reduce(function(s,e){return s+(e.balance||0);},0);
+  var html='<div class="section-hdr"><span>'+matches.length+' result'+(matches.length>1?'s':'')+' · '+fmtM(tot)+(bal>0?' (bal '+fmtM(bal)+')':'')+'</span></div>';
+  matches.forEach(function(e){html+=expCardHTML(e);});
+  resEl.innerHTML=html; resEl.style.display='';
+}
+
+var _attachTargetId=null;
+function uploadFileToDrive(file,label){
+  return new Promise(function(resolve,reject){
+    if(!S.url){reject('no Sheet URL');return;}
+    var reader=new FileReader();
+    reader.onload=function(){
+      var b64=String(reader.result).split(',')[1]||'';
+      fetch(S.url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'uploadDoc',expId:label,filename:file.name,mimeType:file.type||'application/octet-stream',data:b64})})
+        .then(function(r){return r.json();})
+        .then(function(d){ if(d&&d.url)resolve(d.url); else reject((d&&d.error)||'failed'); })
+        .catch(function(){reject('network');});
+    };
+    reader.readAsDataURL(file);
+  });
+}
+function quickAttach(id){
+  if(!S.url){showToast('Set Sheet URL in Settings first');return;}
+  _attachTargetId=id;
+  var inp=document.getElementById('quick-attach-file');
+  if(inp){inp.value='';inp.click();}
+}
+function onQuickAttachFile(input){
+  var file=input.files&&input.files[0];
+  if(!file||!_attachTargetId)return;
+  if(file.size>15*1024*1024){showToast('File too large (max 15 MB)');return;}
+  var e=S.expenses.find(function(x){return x.id===_attachTargetId;});
+  if(!e){showToast('Expense not found');return;}
+  showToast('Uploading '+file.name+'…');
+  uploadFileToDrive(file,e.id).then(function(url){
+    e.driveLink=url;e.updatedAt=Date.now();
+    localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
+    if(S.url)syncToSheet(e);
+    showToast('✓ Attached to '+e.party);
+    var se=document.getElementById('dash-search');
+    if(se&&se.value.trim())onDashSearch();else renderDashboard();
+  }).catch(function(err){
+    showToast('Upload failed'+(err&&err!=='failed'?': '+err:''));
+  });
+}
+function uploadExpenseDoc(input){
+  var file=input.files&&input.files[0];
+  if(!file)return;
+  if(!S.url){showToast('Set Sheet URL in Settings first'); input.value=''; return;}
+  if(file.size>15*1024*1024){showToast('File too large (max 15 MB)'); input.value=''; return;}
+  var statusEl=document.getElementById('exp-file-status');
+  statusEl.innerHTML='Uploading '+file.name+'…';
+  var reader=new FileReader();
+  reader.onload=function(){
+    var b64=String(reader.result).split(',')[1]||'';
+    var label=document.getElementById('exp-edit-id').value||('EXP'+Date.now().toString().slice(-10));
+    var payload={action:'uploadDoc',expId:label,filename:file.name,mimeType:file.type||'application/octet-stream',data:b64};
+    fetch(S.url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if(d&&d.url){
+          document.getElementById('exp-drive').value=d.url;
+          statusEl.innerHTML='<span style="color:var(--green);">✓ Uploaded — link saved to this expense</span>';
+        } else {
+          statusEl.innerHTML='<span style="color:var(--red);">Upload failed'+(d&&d.error?': '+d.error:'')+'</span>';
+        }
+      })
+      .catch(function(){ statusEl.innerHTML='<span style="color:var(--red);">Upload failed (network). Re-deploy Apps Script?</span>'; });
+  };
+  reader.readAsDataURL(file);
+}
+
 function renderDashboard(){
   var exps=getFilteredExp();
   var tot=exps.reduce(function(s,e){return s+(e.total||0);},0);
@@ -719,6 +812,7 @@ function expCardHTML(e){
   var gstTag=e.gstMode&&e.gstMode!=='none'?'<span class="tag gst">GST '+e.gstRate+'%</span>':'';
   var balTag=e.balance>0?'<span class="tag bal">Bal: '+fmtM(e.balance)+'</span>':'';
   var slip=e.driveLink?'<a href="'+e.driveLink+'" target="_blank" onclick="event.stopPropagation()" style="font-size:11px;color:var(--blue);text-decoration:none;">&#128206; Slip</a>':'';
+  var attach='<span onclick="event.stopPropagation();quickAttach(\''+e.id+'\')" style="font-size:11px;color:var(--amber);cursor:pointer;margin-left:8px;">&#128206; '+(e.driveLink?'Replace':'Attach')+'</span>';
   return '<div class="exp-card '+sc+'" onclick="viewExpense(\''+e.id+'\')">'+
     '<div class="exp-row">'+
       '<div><div class="exp-party">'+e.party+'</div>'+
@@ -726,7 +820,7 @@ function expCardHTML(e){
       '<div style="text-align:right;"><div class="exp-amount">'+fmtM(e.total)+'</div>'+
       '<div class="exp-meta">Paid: '+fmtM(e.paid)+'</div></div>'+
     '</div>'+
-    '<div class="exp-tags"><span class="tag cat">'+e.category+'</span>'+gstTag+balTag+slip+'</div>'+
+    '<div class="exp-tags"><span class="tag cat">'+e.category+'</span>'+gstTag+balTag+slip+attach+'</div>'+
     (e.desc?'<div style="font-size:11px;color:var(--muted);margin-top:4px;">'+e.desc+'</div>':'')+
   '</div>';
 }
@@ -746,6 +840,8 @@ function showAddExpense(){
   document.getElementById('exp-desc').value='';
   document.getElementById('exp-ref').value='';
   document.getElementById('exp-drive').value='';
+  var _ef=document.getElementById('exp-file'); if(_ef)_ef.value='';
+  var _efs=document.getElementById('exp-file-status'); if(_efs)_efs.textContent='';
   setGstMode('none');
   populatePartyDL();
   openModal('modal-expense');
@@ -770,6 +866,8 @@ function showEditExpense(id){
   document.getElementById('exp-desc').value=e.desc||'';
   document.getElementById('exp-ref').value=e.ref||'';
   document.getElementById('exp-drive').value=e.driveLink||'';
+  var _ef2=document.getElementById('exp-file'); if(_ef2)_ef2.value='';
+  var _efs2=document.getElementById('exp-file-status'); if(_efs2)_efs2.innerHTML=e.driveLink?'<span style=\"color:var(--green);\">\u2713 Document attached</span>':'';
   setGstMode(e.gstMode||'none');
   if(e.gstMode&&e.gstMode!=='none'){
     document.getElementById('gst-rate').value=e.gstRate||18;
@@ -1548,6 +1646,8 @@ function getAppsScript(){
     'function getSheet(date){var ss=SpreadsheetApp.openById(SS_ID);var m=(date||"").slice(0,7)||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"yyyy-MM");var name="Expenses_"+m;var sh=ss.getSheetByName(name)||ss.insertSheet(name);if(sh.getLastRow()===0){var h=["ID","Date","Party","Category","Item","State","Total","Paid","Balance","GST Mode","GST Rate","GST Amt","Base Amt","Payment","Ref","Drive Link","Description","Role","Synced"];sh.appendRow(h);sh.getRange(1,1,1,h.length).setFontWeight("bold").setBackground("#1A3A1F").setFontColor("#fff");sh.setFrozenRows(1);}return sh;}',
     'function logExp(p){var lock=LockService.getScriptLock();try{lock.waitLock(30000);}catch(e){return j({error:"busy, try again"});}try{var sh=getSheet(p.date);var now=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"dd/MM/yyyy HH:mm");var row=[p.expId,p.date,p.party,p.category,p.item||"",p.state||"",+p.total||0,+p.paid||0,+p.balance||0,p.gstMode||"none",p.gstRate||"",+p.gstAmt||0,+p.baseAmt||0,p.payMethod||"",p.ref||"",p.driveLink||"",p.desc||"",p.role||"",now];var data=sh.getDataRange().getValues();for(var r=1;r<data.length;r++){if(String(data[r][0])===String(p.expId)){sh.getRange(r+1,1,1,row.length).setValues([row]);sh.getRange(r+1,1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"updated"});}}sh.appendRow(row);sh.getRange(sh.getLastRow(),1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"ok"});}finally{lock.releaseLock();}}',
     'function getExps(p){var ss=SpreadsheetApp.openById(SS_ID);var month=p.month||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"yyyy-MM");var shName="Expenses_"+month;var sh=ss.getSheetByName(shName);if(!sh)return j({expenses:[],month:month});var data=sh.getDataRange().getValues();if(data.length<2)return j({expenses:[],month:month});var headers=data[0];var rows=data.slice(1).map(function(r){var o={};headers.forEach(function(h,i){o[h]=r[i];});return o;});return j({expenses:rows,month:month,count:rows.length});}',
+    'function doPost(e){try{var p=JSON.parse(e.postData.contents);if((p.action||"")=="uploadDoc")return uploadDoc(p);return j({error:"unknown"});}catch(err){return j({error:err.message});}}',
+    'function uploadDoc(p){var fs=DriveApp.getFoldersByName("Gaavn Expense Docs");var folder=fs.hasNext()?fs.next():DriveApp.createFolder("Gaavn Expense Docs");var bytes=Utilities.base64Decode(p.data);var blob=Utilities.newBlob(bytes,p.mimeType||"application/octet-stream",((p.expId||"doc")+"_"+(p.filename||"file")));var file=folder.createFile(blob);file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW);return j({url:file.getUrl(),id:file.getId()});}',
   ].join('\n');
 }
 
@@ -1679,7 +1779,7 @@ async function loadExpensesFromSheet() {
     // Fetch current month and previous month sheets
     var months = [];
     var now = new Date();
-    for(var i=0; i<3; i++) {
+    for(var i=0; i<12; i++) {
       var d = new Date(now.getFullYear(), now.getMonth()-i, 1);
       var m = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
       months.push(m);
@@ -1712,6 +1812,7 @@ async function loadExpensesFromSheet() {
               baseAmount: parseFloat(row['Base Amt']||row[12])||0,
               payMethodId: pm?pm.id:'',
               ref: row['Ref']||row[14]||'',
+              driveLink: row['Drive Link']||row[15]||'',
               desc: row['Description']||row[16]||'',
             });
             loaded++;
