@@ -165,7 +165,7 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
-      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v28</span>
+      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v30</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
@@ -2250,12 +2250,31 @@ function matchAndShowResults(txns) {
   // Apply date range filter
   var fromDate = document.getElementById('stmt-from').value;
   var toDate   = document.getElementById('stmt-to').value;
+  var _rawCount = txns.length;
+  var _rawDates = txns.map(function(x){return x.date;}).filter(Boolean).sort();
+  var _rangeInverted = false;
+  if(fromDate && toDate && fromDate > toDate){
+    // From is after To \u2014 invalid range; ignore it so data still shows.
+    _rangeInverted = true; fromDate=''; toDate='';
+  }
   if(fromDate || toDate) {
     txns = txns.filter(function(t) {
       if(fromDate && t.date < fromDate) return false;
       if(toDate   && t.date > toDate)   return false;
       return true;
     });
+  }
+  if(_rawCount > 0 && txns.length === 0) {
+    var _lo=_rawDates[0], _hi=_rawDates[_rawDates.length-1];
+    document.getElementById('stmt-processing').style.display='none';
+    document.getElementById('stmt-summary').innerHTML =
+      '<div style="background:var(--rl,#FDECEA);color:var(--red);border-radius:8px;padding:10px 12px;font-size:13px;line-height:1.5;">'+
+      '\u26A0 Your date filter ('+(fromDate||'any')+' \u2192 '+(toDate||'any')+') excluded all '+_rawCount+' transaction(s) in this file '+
+      '(the file is dated '+_lo+' to '+_hi+').<br>Clear both date boxes to include everything, or set the range to cover '+_lo+'\u2013'+_hi+'.</div>';
+    document.getElementById('stmt-bulk-actions').innerHTML='';
+    document.getElementById('stmt-missing-list').innerHTML='';
+    document.getElementById('stmt-results').style.display='block';
+    return;
   }
   var exactMatched = [], probableMatched = [], missing = [], skipped = [];
   var learned = getLearnedPatterns();
@@ -2357,6 +2376,7 @@ function matchAndShowResults(txns) {
   var _period = (_from||'?')+' → '+(_to||'?');
   var parityHtml =
     '<div style="font-size:12px;background:var(--bl,#EAF2FB);border-radius:8px;padding:8px 10px;margin-bottom:10px;line-height:1.5;">' +
+      (_rangeInverted ? '\u26A0 Date range was invalid (From after To) \u2014 ignored it; showing all in the file.<br>' : '') +
       '\uD83D\uDCC4 <b>Uploaded statement:</b> '+txns.length+' debit(s) &nbsp;\u00b7&nbsp; \uD83D\uDCC1 <b>Already in app</b> ('+_srcLabel+', '+_period+'): <b>'+_appInPeriod+'</b>' +
       (_extra>0 ? '<div style="color:var(--red);margin-top:4px;">\u26A0 '+_extra+' app expense(s) in this period are NOT in the statement \u2014 review for extras/duplicates.</div>' : '') +
       ((missing.length+probableMatched.length)>0 ? '<div style="color:var(--amber);margin-top:4px;">'+(missing.length+probableMatched.length)+' statement item(s) not yet in the app (below).</div>' : '<div style="color:var(--green);margin-top:4px;">\u2713 Every statement item is in the app.</div>') +
@@ -2447,6 +2467,12 @@ function reviewImportItem(idx) {
   openImportItemAt(idx);
 }
 
+function onImportCatChange(){
+  var cat=document.getElementById('import-category').value;
+  var items=(typeof itemsForCategory==='function') ? itemsForCategory(cat) : (S.items[cat]||[]);
+  var dl=document.getElementById('import-item-list');
+  if(dl) dl.innerHTML=(items||[]).map(function(i){return '<option value="'+String(i).replace(/"/g,'&quot;')+'">';}).join('');
+}
 function openImportItemAt(idx) {
   var txn = _missingTxns[idx];
   if(!txn) return;
@@ -2462,6 +2488,15 @@ function openImportItemAt(idx) {
   var cats = S.cats.map(function(c){ return '<option value="'+c+'">'+c+'</option>'; }).join('');
   document.getElementById('import-category').innerHTML = '<option value="">Select...</option>' + cats;
   document.getElementById('import-category').value = txn.autoCat || '';
+
+  // Party autocomplete: all known parties (saved + seen in expenses)
+  var _pset={}, _pnames=[];
+  (S.parties||[]).forEach(function(pp){ var n=(pp.name||'').trim(); if(n&&!_pset[n.toLowerCase()]){_pset[n.toLowerCase()]=1;_pnames.push(n);} });
+  (S.expenses||[]).forEach(function(e){ var n=(e.party||'').trim(); if(n&&!_pset[n.toLowerCase()]){_pset[n.toLowerCase()]=1;_pnames.push(n);} });
+  _pnames.sort(function(a,b){return a.localeCompare(b);});
+  document.getElementById('import-party-list').innerHTML = _pnames.map(function(n){return '<option value="'+n.replace(/"/g,'&quot;')+'">';}).join('');
+  // Item autocomplete for the chosen category
+  onImportCatChange();
 
   // Build meta / probable match display
   var meta = document.getElementById('import-item-meta');
@@ -2799,17 +2834,19 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
       <div id="import-item-meta" style="color:var(--muted);"></div>
     </div>
     <div class="form-group">
-      <label class="form-label">Party Name *</label>
-      <input type="text" class="form-input" id="import-party" placeholder="e.g. Shubham Carry">
+      <label class="form-label">Party Name * <span style="font-size:10px;color:var(--muted);font-weight:400;">(type to match existing)</span></label>
+      <input type="text" class="form-input" id="import-party" list="import-party-list" autocomplete="off" placeholder="Start typing to pick an existing party">
+      <datalist id="import-party-list"></datalist>
     </div>
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">Category *</label>
-        <select class="form-input" id="import-category"><option value="">Select...</option></select>
+        <select class="form-input" id="import-category" onchange="onImportCatChange()"><option value="">Select...</option></select>
       </div>
       <div class="form-group">
         <label class="form-label">Item</label>
-        <input type="text" class="form-input" id="import-item-name" placeholder="Optional">
+        <input type="text" class="form-input" id="import-item-name" list="import-item-list" autocomplete="off" placeholder="Type to pick existing">
+        <datalist id="import-item-list"></datalist>
       </div>
     </div>
     <div class="form-row">
