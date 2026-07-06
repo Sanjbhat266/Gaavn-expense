@@ -165,7 +165,7 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
-      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v25</span>
+      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v26</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
@@ -2796,4 +2796,9 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
     </div>
     <div style="display:flex;gap:8px;margin-top:8px;">
       <button class="btn btn-secondary" onclick="closeModal('modal-import-item')" style="flex:1;">Close</button>
-      <button class="btn btn-primary"
+      <button class="btn btn-primary" onclick="saveImportItem()" style="flex:1;">✓ Add Expense</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>
