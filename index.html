@@ -165,7 +165,7 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
-      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v26</span>
+      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v28</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
@@ -2081,18 +2081,21 @@ function parseCSVStatement(text) {
       txns.push({date: isoDate, desc: (cols[1]||'').replace(/^["']|["']$/g,'').trim(), amount: amt, source: 'Axis CC'});
     });
   } else {
+    // Kotak — robust to delimiter (comma/tab), quoted fields, and amounts whose
+    // thousands-comma got split across columns (e.g. 6,174 -> "6","174").
+    var useTab = text.indexOf('\t') >= 0;
     lines.forEach(function(line) {
-      var cols = parseCSVLine(line);
-      if(cols.length < 7) return;
-      var dc = (cols[6]||'').trim().replace(/^["']|["']$/g,'');
-      if(dc !== 'DR') return;
-      var amtStr = (cols[5]||'').replace(/[,\s"']/g,'').trim();
-      var amt = parseFloat(amtStr);
+      var cols = useTab ? line.split('\t') : parseCSVLine(line);
+      cols = cols.map(function(x){ return String(x==null?'':x).replace(/^["']|["']$/g,'').trim(); });
+      if(cols.length < 6) return;
+      var dcIdx = -1;
+      for(var i=3;i<cols.length;i++){ var v=cols[i].toUpperCase(); if(v==='DR'||v==='CR'){ dcIdx=i; break; } }
+      if(dcIdx < 0 || cols[dcIdx].toUpperCase() !== 'DR') return;   // debits (expenses) only
+      var amt = parseFloat(cols.slice(5, dcIdx).join('').replace(/[^\d.]/g,''));
       if(isNaN(amt) || amt <= 0) return;
-      var dateStr = ((cols[2]||cols[1])||'').trim().replace(/^["']|["']$/g,'');
-      var isoDate = parseKotakDate(dateStr);
+      var isoDate = parseKotakDate((cols[2]||cols[1]||'').trim());
       if(!isoDate) return;
-      txns.push({date: isoDate, desc: (cols[3]||'').replace(/^["']|["']$/g,'').trim(), amount: amt, source: 'Kotak Bank', bankCat: (cols[7]||'').trim()});
+      txns.push({date: isoDate, desc: (cols[3]||'').trim(), amount: amt, source: 'Kotak Bank', bankCat: (cols[7]||'').trim()});
     });
   }
   return txns;
@@ -2132,8 +2135,8 @@ function parseKotakDate(val) {
   var str = String(val).trim();
   // yyyy-mm-dd (SheetJS dateNF output) or ISO datetime
   if(str.match(/^\d{4}-\d{2}-\d{2}/)) return str.slice(0,10);
-  // d/m/yyyy or dd/mm/yyyy
-  var m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  // dd-mm-yyyy or dd/mm/yyyy (hyphen or slash), optional trailing time
+  var m = str.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
   if(m) return m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');
   // Anything parseable by Date (e.g. "May 31, 2026")
   var ts = Date.parse(str);
@@ -2334,8 +2337,33 @@ function matchAndShowResults(txns) {
   _missingTxns = probableMatched.concat(missing);
   document.getElementById('stmt-processing').style.display = 'none';
 
+  // ── Parity check: statement count vs what the app already has for this period ──
+  var _f = document.getElementById('stmt-from').value || '';
+  var _t = document.getElementById('stmt-to').value || '';
+  var _ds = txns.map(function(x){return x.date;}).filter(Boolean).sort();
+  var _from = _f || (_ds.length ? _ds[0] : '');
+  var _to   = _t || (_ds.length ? _ds[_ds.length-1] : '');
+  var _appInPeriod = S.expenses.filter(function(e){
+    if(_from && (e.date||'') < _from) return false;
+    if(_to   && (e.date||'') > _to)   return false;
+    var pm = S.pm.find(function(p){return p.id===e.payMethodId;});
+    var pn = ((pm&&pm.name)||'').toLowerCase();
+    return _stmtSource==='axis'
+      ? (pn.indexOf('credit')>=0 || pn.indexOf('axis')>=0 || pn.indexOf('cc')>=0)
+      : (pn.indexOf('kotak')>=0);
+  }).length;
+  var _srcLabel = _stmtSource==='axis' ? 'Axis CC' : 'Kotak Bank';
+  var _extra = _appInPeriod - exactMatched.length;
+  var _period = (_from||'?')+' → '+(_to||'?');
+  var parityHtml =
+    '<div style="font-size:12px;background:var(--bl,#EAF2FB);border-radius:8px;padding:8px 10px;margin-bottom:10px;line-height:1.5;">' +
+      '\uD83D\uDCC4 <b>Uploaded statement:</b> '+txns.length+' debit(s) &nbsp;\u00b7&nbsp; \uD83D\uDCC1 <b>Already in app</b> ('+_srcLabel+', '+_period+'): <b>'+_appInPeriod+'</b>' +
+      (_extra>0 ? '<div style="color:var(--red);margin-top:4px;">\u26A0 '+_extra+' app expense(s) in this period are NOT in the statement \u2014 review for extras/duplicates.</div>' : '') +
+      ((missing.length+probableMatched.length)>0 ? '<div style="color:var(--amber);margin-top:4px;">'+(missing.length+probableMatched.length)+' statement item(s) not yet in the app (below).</div>' : '<div style="color:var(--green);margin-top:4px;">\u2713 Every statement item is in the app.</div>') +
+    '</div>';
+
   // Summary
-  var summaryHtml =
+  var summaryHtml = parityHtml +
     '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:12px;">' +
     '<div class="summary-chip"><div class="chip-val">'+txns.length+'</div><div class="chip-lbl">Total</div></div>' +
     '<div class="summary-chip"><div class="chip-val" style="color:var(--green);">'+exactMatched.length+'</div><div class="chip-lbl">✓ Matched</div></div>' +
