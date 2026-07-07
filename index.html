@@ -165,7 +165,7 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
-      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v30</span>
+      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v31</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
@@ -207,6 +207,10 @@ datalist{display:none;}
       <button class="btn btn-blue btn-sm" onclick="openImportStatement()" style="background:var(--blue);color:#fff;">&#128196; Import Statement</button>
       <button class="btn btn-secondary btn-sm" onclick="clearRptFilters()">Clear Filters</button>
       <button class="btn btn-secondary btn-sm" onclick="deduplicateExpenses()" style="border-color:#FF5722;color:#FF5722;">&#10003; Remove Duplicates</button>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <button class="btn btn-sm btn-primary" id="rptview-detailed" onclick="setRptView('detailed')" style="flex:1;">📋 Detailed</button>
+      <button class="btn btn-sm btn-secondary" id="rptview-catsum" onclick="setRptView('catsum')" style="flex:1;">📊 Category Summary</button>
     </div>
     <div id="report-content"></div>
   </div>
@@ -1490,8 +1494,81 @@ function getRptExps(){
   });
 }
 
+var _rptView='detailed';
+var _catSumData=null;
+function _syncRptViewBtns(){
+  var d=document.getElementById('rptview-detailed'), c=document.getElementById('rptview-catsum');
+  if(!d||!c)return;
+  d.className='btn btn-sm '+(_rptView==='detailed'?'btn-primary':'btn-secondary');
+  c.className='btn btn-sm '+(_rptView==='catsum'?'btn-primary':'btn-secondary');
+}
+function setRptView(v){_rptView=v;_syncRptViewBtns();renderReports();}
+
+function _inr(n){return Math.round(parseFloat(n)||0).toLocaleString('en-IN');}
+
+function renderCategorySummary(exps){
+  var byCat={};
+  exps.forEach(function(e){var k=e.category||'(Uncategorised)';if(!byCat[k])byCat[k]={t:0,n:0};byCat[k].t+=e.total||0;byCat[k].n++;});
+  var rows=Object.entries(byCat).sort(function(a,b){return a[0].localeCompare(b[0]);});
+  var grand=rows.reduce(function(s,kv){return s+kv[1].t;},0);
+  var from=document.getElementById('rpt-from').value||'';
+  var to=document.getElementById('rpt-to').value||'';
+  _catSumData={rows:rows.map(function(kv){return [kv[0],Math.round(kv[1].t)];}),grand:Math.round(grand),from:from,to:to};
+  var h='';
+  h+='<div style="display:flex;gap:8px;margin-bottom:12px;">';
+  h+='<button class="btn btn-sm btn-primary" onclick="copyCategorySummary()" style="flex:1;background:var(--green);color:#fff;">📋 Copy</button>';
+  h+='<button class="btn btn-sm btn-secondary" onclick="downloadCategorySummaryCSV()" style="flex:1;">↓ CSV</button>';
+  h+='</div>';
+  if(from||to){h+='<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">'+(from?fmtDate(from):'')+' – '+(to?fmtDate(to):'')+'  ·  '+exps.length+' entries</div>';}
+  if(!rows.length){h+='<div class="empty"><div class="empty-text">No results</div></div>';return h;}
+  h+='<div class="report-section" style="padding:0;">';
+  h+='<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+  h+='<thead><tr>';
+  h+='<th style="text-align:left;padding:8px 10px;border-bottom:2px solid var(--border);font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);">Category</th>';
+  h+='<th style="text-align:right;padding:8px 10px;border-bottom:2px solid var(--border);font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);">Total Amount</th>';
+  h+='</tr></thead><tbody>';
+  rows.forEach(function(kv){
+    h+='<tr>'
+      +'<td style="padding:9px 10px;border-bottom:1px solid var(--border);font-weight:600;">'+kv[0]+'&nbsp;<span style="color:var(--muted);font-size:11px;font-weight:400;">('+kv[1].n+')</span></td>'
+      +'<td style="padding:9px 10px;border-bottom:1px solid var(--border);text-align:right;font-weight:700;color:var(--amber);">'+_inr(kv[1].t)+'</td>'
+    +'</tr>';
+  });
+  h+='<tr>'
+    +'<td style="padding:11px 10px;border-top:2px solid var(--border);font-weight:800;text-transform:uppercase;">Total</td>'
+    +'<td style="padding:11px 10px;border-top:2px solid var(--border);text-align:right;font-weight:800;font-family:\'DM Serif Display\',serif;font-size:16px;">'+_inr(grand)+'</td>'
+  +'</tr>';
+  h+='</tbody></table></div>';
+  return h;
+}
+
+function copyCategorySummary(){
+  if(!_catSumData){showToast('Nothing to copy');return;}
+  var lines=['Category\tTotal Amount'];
+  _catSumData.rows.forEach(function(r){lines.push(r[0]+'\t'+_inr(r[1]));});
+  lines.push('TOTAL\t'+_inr(_catSumData.grand));
+  var txt=lines.join('\n');
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(function(){showToast('✓ Category summary copied');},function(){_fallbackCopy(txt);});
+  } else {_fallbackCopy(txt);}
+}
+function _fallbackCopy(txt){
+  try{var ta=document.createElement('textarea');ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);showToast('✓ Copied');}catch(e){showToast('Copy failed');}
+}
+function downloadCategorySummaryCSV(){
+  if(!_catSumData){showToast('Nothing to export');return;}
+  var csv='Category,Total Amount\n';
+  _catSumData.rows.forEach(function(r){csv+='"'+String(r[0]).replace(/"/g,'""')+'",'+r[1]+'\n';});
+  csv+='TOTAL,'+_catSumData.grand+'\n';
+  var tag=(_catSumData.from||'').slice(0,7)||todayStr().slice(0,7);
+  var blob=new Blob([csv],{type:'text/csv'});
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='Category_Summary_'+tag+'.csv';a.click();URL.revokeObjectURL(a.href);
+  showToast('✓ CSV downloaded');
+}
+
 function renderReports(){
+  _syncRptViewBtns();
   var exps=getRptExps();
+  if(_rptView==='catsum'){document.getElementById('report-content').innerHTML=renderCategorySummary(exps);return;}
   var tot=exps.reduce(function(s,e){return s+(e.total||0);},0);
   var paid=exps.reduce(function(s,e){return s+(e.paid||0);},0);
   var bal=exps.reduce(function(s,e){return s+(e.balance||0);},0);
