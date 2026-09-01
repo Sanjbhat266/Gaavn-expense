@@ -215,6 +215,59 @@ datalist{display:none;}
     <div id="report-content"></div>
   </div>
 
+  <div class="screen main" id="screen-credit" style="display:none;overflow-y:auto;">
+    <div class="card" style="margin-bottom:10px;">
+      <div class="card-head">
+        <div class="card-title">Supplier Credit</div>
+        <button class="btn btn-secondary btn-sm" onclick="ptLoadCreditors()">&#8635; Refresh</button>
+      </div>
+      <div class="card-body">
+        <div id="cred-summary" style="margin-bottom:10px;"></div>
+        <div id="cred-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: PAY A PARTY -->
+  <div class="modal-overlay" id="modal-pay">
+    <div class="modal-sheet">
+      <div class="modal-head">
+        <div class="modal-title" id="pay-title">Pay Supplier</div>
+        <button class="modal-x" onclick="closeModal('modal-pay')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="pay-bills" style="margin-bottom:12px;"></div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Amount Paying *</label>
+            <div class="input-pfx"><span class="input-pfx-label">&#8377;</span>
+              <input type="number" class="form-input" id="pay-amount" placeholder="0" oninput="ptPreviewAllocation()">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Date *</label>
+            <input type="date" class="form-input" id="pay-date">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Paid From *</label>
+            <select class="form-input" id="pay-method"></select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Ref / UTR</label>
+            <input type="text" class="form-input" id="pay-ref" placeholder="Cheque / UTR no.">
+          </div>
+        </div>
+        <div id="pay-preview" style="font-size:12px;line-height:1.7;margin:4px 0 10px;"></div>
+        <div style="display:flex;gap:10px;">
+          <button class="btn btn-secondary" style="flex:1;" onclick="closeModal('modal-pay')">Cancel</button>
+          <button class="btn btn-primary" style="flex:1;" onclick="ptSavePayment()">Record Payment</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="screen main" id="screen-settings" style="display:none;">
     <div class="card" style="margin-bottom:10px;">
       <div class="card-head"><div class="card-title">Google Sheet</div></div>
@@ -228,6 +281,24 @@ datalist{display:none;}
           <button class="btn btn-secondary btn-sm" onclick="testSheetUrl()">Test</button>
           <button class="btn btn-secondary btn-sm" onclick="showAppsScript()">View Script</button>
         </div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:10px;">
+      <div class="card-head"><div class="card-title">Production Tracker &mdash; Materials &amp; Credit</div></div>
+      <div class="card-body">
+        <div class="form-group">
+          <label class="form-label">Tracker Apps Script URL</label>
+          <input type="url" class="form-input" id="pt-url-input" placeholder="https://script.google.com/macros/s/.../exec">
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.6;">
+          The same URL the Production Tracker uses in its Setup tab. Material purchases entered here update
+          inventory, ingredient rates and COGS in the tracker. Leave blank and the app behaves exactly as before.
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" onclick="ptSaveUrl()">Save</button>
+          <button class="btn btn-secondary btn-sm" onclick="ptRefreshMaterials(false)">&#8635; Refresh item list</button>
+        </div>
+        <div id="pt-url-msg" style="font-size:11px;margin-top:8px;"></div>
       </div>
     </div>
     <div class="card" style="margin-bottom:10px;">
@@ -279,6 +350,9 @@ datalist{display:none;}
     <button class="nav-btn" id="nav-reports" onclick="switchTab('reports')">
       <span class="nav-icon">&#128202;</span>Reports
     </button>
+    <button class="nav-btn" id="nav-credit" onclick="switchTab('credit')">
+      <span class="nav-icon">&#129534;</span>Credit
+    </button>
     <button class="nav-btn" id="nav-settings" onclick="switchTab('settings')">
       <span class="nav-icon">&#9881;</span>Settings
     </button>
@@ -321,6 +395,18 @@ datalist{display:none;}
           <button id="btn-add-item" onclick="showAddItemInline()" style="display:none;position:absolute;right:8px;top:50%;transform:translateY(-50%);background:var(--amber);color:#fff;border:none;border-radius:6px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;">+ Add</button>
         </div>
       </div>
+    </div>
+    <div id="mat-panel" style="display:none;border:1.5px solid #cfe3d4;background:#F4FAF5;border-radius:10px;padding:10px;margin-bottom:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <div style="font-size:12px;font-weight:700;color:#1A3A1F;">Stock items on this bill</div>
+        <button class="btn btn-amber btn-sm" onclick="matAddLine()">+ item</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.5;">
+        Enter it the way the invoice reads &mdash; qty and rate <b>before GST</b>. Stock, the weighted cost and COGS update themselves.
+      </div>
+      <div id="mat-lines"></div>
+      <div id="mat-total" style="font-size:12px;font-weight:700;text-align:right;margin-top:8px;"></div>
+      <div id="mat-warn" style="font-size:11px;color:#C62828;margin-top:6px;"></div>
     </div>
     <div class="form-row">
       <div class="form-group">
@@ -658,7 +744,7 @@ function showOnlyScreen(id){
 }
 
 function switchTab(tab){
-  ['dashboard','reports','settings'].forEach(function(t){
+  ['dashboard','reports','credit','settings'].forEach(function(t){
     var s=document.getElementById('screen-'+t);
     var n=document.getElementById('nav-'+t);
     if(s){
@@ -671,10 +757,11 @@ function switchTab(tab){
     }
     if(n)n.classList.toggle('active',t===tab);
   });
-  var titles={dashboard:'Expenses',reports:'Reports',settings:'Settings'};
+  var titles={dashboard:'Expenses',reports:'Reports',credit:'Supplier Credit',settings:'Settings'};
   document.getElementById('topbar-title').textContent=titles[tab]||'';
   document.getElementById('btn-add-exp').style.display=tab==='dashboard'?'':'none';
   if(tab==='reports')renderReports();
+  if(tab==='credit')ptLoadCreditors();
   if(tab==='settings')renderSettings();
 }
 
@@ -850,6 +937,7 @@ function showAddExpense(){
   var _ef=document.getElementById('exp-file'); if(_ef)_ef.value='';
   var _efs=document.getElementById('exp-file-status'); if(_efs)_efs.textContent='';
   setGstMode('none');
+  MAT.lines=[]; matOnCategory('');
   populatePartyDL();
   openModal('modal-expense');
 }
@@ -880,6 +968,8 @@ function showEditExpense(id){
     document.getElementById('gst-rate').value=e.gstRate||18;
     recalcAmounts();
   }
+  MAT.lines=(e.matLines||[]).map(function(L){return {itemId:L.itemId,qty:L.qty,rate:L.rate,amount:L.amount};});
+  matOnCategory(e.category||'');
   openModal('modal-expense');
 }
 
@@ -957,6 +1047,7 @@ function saveExpense(){
     party:party,category:category,item:item,date:date,state:state,
     total:total,paid:paid,balance:balance,payMethodId:payMethodId,
     desc:desc,ref:ref,driveLink:driveLink,
+    matLines:matIsMaterialCat(category)?MAT.lines.slice():[],
     gstMode:gstMode,
     gstRate:gstMode!=='none'?gstRate:null,
     gstAmount:gstMode!=='none'?gstAmt:null,
@@ -972,6 +1063,7 @@ function saveExpense(){
   }
   localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
   if(S.url)syncToSheet(obj);
+  matAfterSave(obj,editId);
   closeModal('modal-expense');
   renderDashboard();
   _savingExpense=false; // release lock
@@ -980,6 +1072,8 @@ function saveExpense(){
 
 function deleteExpense(id){
   if(!confirm('Delete this expense?'))return;
+  var _gone=S.expenses.find(function(x){return x.id===id;});
+  if(_gone && (_gone.matLines||[]).length) ptPost('PURCHASE_BILL_DELETE',{id:id});
   S.expenses=S.expenses.filter(function(x){return x.id!==id;});
   localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
   closeModal('modal-view-exp');
@@ -1043,10 +1137,26 @@ function recalcAmounts(){
 }
 
 function recalcBalance(){
-  var total=parseFloat(document.getElementById('exp-total').value)||0;
+  // v18: in "Add on Base" mode the Total box holds the BASE, so the old
+  // total-minus-paid understated what the supplier is actually owed by the
+  // whole GST amount. The payable is always the gross.
+  var pay=expPayable();
   var paid=parseFloat(document.getElementById('exp-paid').value)||0;
-  document.getElementById('exp-balance').value=Math.max(0,total-paid)||'';
+  document.getElementById('exp-balance').value=Math.max(0,pay-paid)||'';
 }
+
+// gross / gst / net as the three numbers that matter, read off the GST toggle.
+// Costing runs on net (input credit is claimed); the supplier is owed gross.
+function expAmounts(){
+  var total=parseFloat(document.getElementById('exp-total').value)||0;
+  var gst  =parseFloat(document.getElementById('gst-amount-display').value)||0;
+  var base =parseFloat(document.getElementById('base-amount-display').value)||0;
+  var mode =S.gstMode;
+  if(mode==='add')     return {gross:total+gst, gst:gst,  net:total};
+  if(mode==='extract') return {gross:total,     gst:gst,  net:base};
+  return {gross:total, gst:0, net:total};
+}
+function expPayable(){ return expAmounts().gross; }
 
 function itemsForCategory(cat){
   var out=[],seen={};
@@ -1058,6 +1168,7 @@ function itemsForCategory(cat){
 function onCategoryChange(){
   var cat=document.getElementById('exp-category').value;
   var items=itemsForCategory(cat);
+  matOnCategory(cat);
   document.getElementById('item-list').innerHTML=items.map(function(i){return '<option value="'+i.replace(/"/g,'&quot;')+'">';}).join('');
 }
 
@@ -2942,5 +3053,352 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
     </div>
   </div>
 </div>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════════
+   v18 — MATERIALS, STOCK AND SUPPLIER CREDIT
+   One entry here now does four jobs: it records the expense (as before),
+   puts the goods into inventory, sets the weighted cost that COGS uses,
+   and opens a payable if it was bought on credit.
+
+   The two numbers that must never be confused:
+     NET   (ex-GST) — what stock and COGS are valued at. Input credit is
+                      claimed, so the tax is not a cost of the product.
+     GROSS (incl.)  — what the supplier is owed and what you pay them.
+   ══════════════════════════════════════════════════════════════════════ */
+
+var LS_PT_URL='gf_pt_url', LS_PT_MAT='gf_pt_materials', LS_PT_MAT_AT='gf_pt_mat_at';
+
+/* Categories that carry physical stock. Anything else behaves exactly as it
+   did in v17 — fuel, salary, rent and the rest are period costs and never
+   touch inventory. */
+var MAT_CATS=['RAW MATERIAL','PACKING MATERIALS','CONSUMABLES'];
+
+var MAT={lines:[], materials:[], creditors:[], payParty:null, payBills:[]};
+
+function ptUrl(){ return (localStorage.getItem(LS_PT_URL)||'').trim(); }
+function matIsMaterialCat(c){ return MAT_CATS.indexOf(String(c||'').toUpperCase())>=0; }
+function matNum(v){ var n=parseFloat(v); return isFinite(n)?n:0; }
+function matMoney(n){ return '\u20b9'+(Math.round(matNum(n)*100)/100).toLocaleString('en-IN'); }
+
+function ptSaveUrl(){
+  var u=(document.getElementById('pt-url-input').value||'').trim().split('?')[0].replace(/\/+$/,'');
+  localStorage.setItem(LS_PT_URL,u);
+  document.getElementById('pt-url-msg').innerHTML=u
+    ? '<span style="color:var(--green);">Saved. Fetching the item list\u2026</span>'
+    : '<span style="color:var(--muted);">Cleared \u2014 material entries stay local only.</span>';
+  if(u) ptRefreshMaterials(false);
+}
+
+function ptPost(type,data){
+  var u=ptUrl();
+  if(!u) return Promise.resolve({status:'no-url'});
+  return fetch(u+'?payload='+encodeURIComponent(JSON.stringify({type:type,data:data})),{cache:'no-store'})
+    .then(function(r){ return r.json().catch(function(){ return {status:'ok'}; }); });
+}
+
+function ptGet(action,params){
+  var u=ptUrl();
+  if(!u) return Promise.reject(new Error('Set the Tracker URL in Settings first'));
+  var qs='?action='+encodeURIComponent(action);
+  Object.keys(params||{}).forEach(function(k){ qs+='&'+k+'='+encodeURIComponent(params[k]); });
+  return fetch(u+qs,{cache:'no-store'}).then(function(r){ return r.json(); });
+}
+
+function ptMaterials(){
+  try{ return JSON.parse(localStorage.getItem(LS_PT_MAT)||'[]'); }catch(e){ return []; }
+}
+
+function ptRefreshMaterials(silent){
+  var msg=document.getElementById('pt-url-msg');
+  return ptGet('getMaterials',{}).then(function(j){
+    var list=(j&&j.materials)||[];
+    if(list.length){
+      localStorage.setItem(LS_PT_MAT,JSON.stringify(list));
+      localStorage.setItem(LS_PT_MAT_AT,new Date().toISOString());
+      MAT.materials=list;
+    }
+    if(msg&&!silent) msg.innerHTML='<span style="color:var(--green);">'+list.length+' items loaded from the tracker.</span>';
+    matRenderLines();
+    return list;
+  }).catch(function(e){
+    if(msg&&!silent) msg.innerHTML='<span style="color:var(--red);">Could not reach the tracker \u2014 '+e.message+'</span>';
+    if(!silent) showToast('Could not reach the tracker');
+    return ptMaterials();
+  });
+}
+
+/* ── the lines on a bill ─────────────────────────────────────────────── */
+function matOnCategory(cat){
+  var panel=document.getElementById('mat-panel');
+  if(!panel) return;
+  if(!matIsMaterialCat(cat)){ panel.style.display='none'; return; }
+  panel.style.display='block';
+  MAT.materials=ptMaterials();
+  if(!MAT.materials.length && ptUrl()) ptRefreshMaterials(true);
+  if(!MAT.lines.length) MAT.lines.push({itemId:'',qty:'',rate:'',amount:''});
+  matRenderLines();
+}
+
+function matAddLine(){ MAT.lines.push({itemId:'',qty:'',rate:'',amount:''}); matRenderLines(); }
+function matDelLine(i){ MAT.lines.splice(i,1); if(!MAT.lines.length) matAddLine(); else { matRenderLines(); matRecalc(); } }
+
+function matFind(id){
+  return MAT.materials.filter(function(m){ return m.id===id; })[0] || null;
+}
+
+function matRenderLines(){
+  var wrap=document.getElementById('mat-lines');
+  if(!wrap) return;
+  if(!MAT.materials.length) MAT.materials=ptMaterials();
+
+  var opts=function(sel){
+    var g={};
+    MAT.materials.filter(function(m){ return m.active!==false; })
+      .forEach(function(m){ (g[m.group||'OTHER']=g[m.group||'OTHER']||[]).push(m); });
+    var h='<option value="">Select item\u2026</option>';
+    Object.keys(g).forEach(function(k){
+      h+='<optgroup label="'+k+'">';
+      g[k].forEach(function(m){
+        h+='<option value="'+m.id+'"'+(m.id===sel?' selected':'')+'>'+m.name+'</option>';
+      });
+      h+='</optgroup>';
+    });
+    return h;
+  };
+
+  wrap.innerHTML=MAT.lines.map(function(L,i){
+    var m=matFind(L.itemId);
+    var pu=m?(m.purchaseUnit||m.unit||''):'';
+    var per=m?(matNum(m.perPack)||1):1;
+    var stockQty=matNum(L.qty)*per;
+    var amt=matNum(L.amount);
+    var hint='';
+    if(m && stockQty>0){
+      hint = '= <b>'+(Math.round(stockQty*1000)/1000)+' '+(m.unit||'')+'</b> into stock'
+           + (amt>0 ? ' at <b>'+matMoney(amt/stockQty)+'/'+(m.unit||'')+'</b> (ex-GST)' : '');
+    } else if(m && per!==1){
+      hint = '1 '+pu+' = '+per+' '+(m.unit||'');
+    }
+    return ''
+    +'<div style="border-top:1px dashed #cfe3d4;padding:8px 0;">'
+      +'<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">'
+        +'<select class="form-input" style="flex:1;font-size:13px;padding:7px 8px;" onchange="matSet('+i+',\'itemId\',this.value)">'+opts(L.itemId)+'</select>'
+        +'<button onclick="matDelLine('+i+')" style="background:none;border:none;color:var(--red);font-size:20px;line-height:1;cursor:pointer;padding:0 4px;">&times;</button>'
+      +'</div>'
+      +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">'
+        +'<div><label style="font-size:10px;color:var(--muted);">Qty'+(pu?' ('+pu+')':'')+'</label>'
+          +'<input type="number" class="form-input" style="font-size:13px;padding:7px 8px;" value="'+(L.qty===''?'':L.qty)+'" oninput="matSet('+i+',\'qty\',this.value)"></div>'
+        +'<div><label style="font-size:10px;color:var(--muted);">Rate'+(pu?' /'+pu:'')+'</label>'
+          +'<input type="number" class="form-input" style="font-size:13px;padding:7px 8px;" value="'+(L.rate===''?'':L.rate)+'" oninput="matSet('+i+',\'rate\',this.value)"></div>'
+        +'<div><label style="font-size:10px;color:var(--muted);">Amount</label>'
+          +'<input type="number" class="form-input" style="font-size:13px;padding:7px 8px;" value="'+(L.amount===''?'':L.amount)+'" oninput="matSet('+i+',\'amount\',this.value)"></div>'
+      +'</div>'
+      +(hint?'<div style="font-size:11px;color:#2d5a3d;margin-top:5px;">'+hint+'</div>':'')
+    +'</div>';
+  }).join('');
+
+  matRecalc();
+}
+
+/* Qty x Rate fills Amount; typing an Amount back-solves the Rate. Either way
+   round, because an invoice sometimes gives you the total and not the rate. */
+function matSet(i,field,val){
+  var L=MAT.lines[i]; if(!L) return;
+  L[field]=val;
+  var q=matNum(L.qty), r=matNum(L.rate), a=matNum(L.amount);
+  if(field==='qty'||field==='rate'){ if(q>0&&r>0) L.amount=Math.round(q*r*100)/100; }
+  else if(field==='amount'){ if(q>0&&a>0) L.rate=Math.round(a/q*10000)/10000; }
+  matRenderLines();
+}
+
+function matRecalc(){
+  var sum=MAT.lines.reduce(function(t,L){ return t+matNum(L.amount); },0);
+  var el=document.getElementById('mat-total');
+  var warn=document.getElementById('mat-warn');
+  if(el) el.innerHTML = sum>0 ? 'Items total: '+matMoney(sum) : '';
+  if(sum>0){
+    var tot=document.getElementById('exp-total');
+    if(tot){ tot.value=Math.round(sum*100)/100; recalcAmounts(); }
+  }
+  var missing=MAT.lines.filter(function(L){ return matNum(L.amount)>0 && !L.itemId; }).length;
+  if(warn) warn.textContent = missing ? missing+' line(s) have an amount but no item selected \u2014 those will not reach stock.' : '';
+}
+
+/* ── after saving the expense ────────────────────────────────────────── */
+function matAfterSave(obj,wasEdit){
+  var lines = matIsMaterialCat(obj.category)
+    ? (obj.matLines||[]).filter(function(L){ return L.itemId && matNum(L.amount)>0; })
+    : [];
+  if(!lines.length){
+    /* An EDIT that no longer carries stock lines — the category was changed
+       away from materials, or every item was removed. The bill has to be
+       retired, or the sheet keeps goods that are not on any invoice any more
+       and the supplier keeps a balance for an entry that no longer exists. */
+    if(wasEdit && ptUrl()) ptPost('PURCHASE_BILL_DELETE',{id:obj.id});
+    return;
+  }
+  if(!ptUrl()){ showToast('Saved locally \u2014 set the Tracker URL in Settings to update stock'); return; }
+
+  var A=expAmounts();
+  /* Allocate the net across the lines in proportion to their amounts, so the
+     line values always add back to the bill's net. Doing it per line with its
+     own rounding is how a bill ends up a rupee out from its own contents. */
+  var lineSum=lines.reduce(function(t,L){ return t+matNum(L.amount); },0);
+  var f = lineSum>0 ? (A.net/lineSum) : 1;
+
+  var payload={
+    id:obj.id, date:obj.date, party:obj.party, category:obj.category,
+    gross:A.gross, gst:A.gst, net:A.net,
+    paidAtEntry:matNum(obj.paid), notes:obj.desc||obj.ref||'',
+    lines:lines.map(function(L,i){
+      var m=matFind(L.itemId)||{};
+      var per=matNum(m.perPack)||1;
+      var stockQty=matNum(L.qty)*per;
+      var net=Math.round(matNum(L.amount)*f*100)/100;
+      return {
+        id:obj.id+'-L'+(i+1),
+        date:obj.date, itemId:L.itemId, itemName:m.name||L.itemId,
+        qty:Math.round(stockQty*1000)/1000, unit:m.unit||'',
+        amount:net, grossAmount:Math.round(matNum(L.amount)*(A.gross/(lineSum||1))*100)/100,
+        supplier:obj.party, billId:obj.id, source:'expense-app'
+      };
+    })
+  };
+
+  ptPost('PURCHASE_BILL',payload).then(function(){
+    var kg=payload.lines.reduce(function(t,L){ return t+L.qty; },0);
+    showToast('Stock updated \u2014 '+payload.lines.length+' item(s), '+(Math.round(kg*100)/100)+' units in');
+  }).catch(function(){
+    showToast('Saved. Stock update failed \u2014 it will retry when you re-save this entry');
+  });
+}
+
+/* ── supplier credit ─────────────────────────────────────────────────── */
+function ptLoadCreditors(){
+  var sum=document.getElementById('cred-summary');
+  var list=document.getElementById('cred-list');
+  if(!ptUrl()){
+    if(sum) sum.innerHTML='';
+    if(list) list.innerHTML='<div style="padding:18px;text-align:center;color:var(--muted);font-size:13px;">Set the Tracker Apps Script URL in Settings to use supplier credit.</div>';
+    return;
+  }
+  if(list) list.innerHTML='<div style="padding:18px;text-align:center;color:var(--muted);font-size:13px;">Loading\u2026</div>';
+
+  ptGet('getCreditors',{}).then(function(j){
+    MAT.creditors=(j&&j.creditors)||[];
+    var total=(j&&j.totalOutstanding)||0;
+    if(sum) sum.innerHTML=
+      '<div class="summary-chip" style="width:100%;"><div class="chip-val" style="color:var(--red);">'+matMoney(total)+'</div>'
+      +'<div class="chip-lbl">Total owed to suppliers &middot; '+MAT.creditors.length+' part'+(MAT.creditors.length===1?'y':'ies')+'</div></div>';
+
+    if(!MAT.creditors.length){
+      list.innerHTML='<div style="padding:18px;text-align:center;color:var(--muted);font-size:13px;">Nothing outstanding.</div>';
+      return;
+    }
+    list.innerHTML=MAT.creditors.map(function(p){
+      var bar=function(label,val,col){
+        if(val<=0) return '';
+        return '<span style="display:inline-block;background:'+col+';color:#fff;border-radius:10px;padding:1px 8px;font-size:10px;margin-right:4px;">'+label+' '+matMoney(val)+'</span>';
+      };
+      return ''
+      +'<div style="border-bottom:1px solid #eee;padding:10px 0;">'
+        +'<div style="display:flex;justify-content:space-between;align-items:center;">'
+          +'<div><div style="font-weight:700;font-size:14px;">'+p.party+'</div>'
+          +'<div style="font-size:11px;color:var(--muted);">'+p.bills+' open bill'+(p.bills===1?'':'s')+' &middot; oldest '+p.oldestDays+' days</div></div>'
+          +'<div style="text-align:right;"><div style="font-weight:700;font-size:15px;color:var(--red);">'+matMoney(p.outstanding)+'</div>'
+          +'<button class="btn btn-primary btn-sm" style="margin-top:4px;" onclick="ptOpenPay(\''+String(p.party).replace(/'/g,"\\'")+'\')">Pay</button></div>'
+        +'</div>'
+        +'<div style="margin-top:6px;">'
+          +bar('0-15',p.d0_15,'#27AE60')+bar('16-30',p.d16_30,'#E67E22')
+          +bar('31-60',p.d31_60,'#C0392B')+bar('60+',p.d60plus,'#7B1010')
+          +(p.advance>0?'<span style="display:inline-block;background:#1565C0;color:#fff;border-radius:10px;padding:1px 8px;font-size:10px;">advance '+matMoney(p.advance)+'</span>':'')
+        +'</div>'
+      +'</div>';
+    }).join('');
+  }).catch(function(e){
+    if(list) list.innerHTML='<div style="padding:18px;text-align:center;color:var(--red);font-size:13px;">Could not reach the tracker \u2014 '+e.message+'</div>';
+  });
+}
+
+function ptOpenPay(party){
+  MAT.payParty=party;
+  document.getElementById('pay-title').textContent='Pay '+party;
+  document.getElementById('pay-date').value=todayStr();
+  document.getElementById('pay-amount').value='';
+  document.getElementById('pay-ref').value='';
+  document.getElementById('pay-preview').innerHTML='';
+  document.getElementById('pay-method').innerHTML=
+    '<option value="">Select\u2026</option>'+S.pm.map(function(m){ return '<option value="'+m.name+'">'+m.name+'</option>'; }).join('');
+  document.getElementById('pay-bills').innerHTML='<div style="color:var(--muted);font-size:12px;">Loading bills\u2026</div>';
+  openModal('modal-pay');
+
+  ptGet('getBills',{party:party,open:'1'}).then(function(j){
+    MAT.payBills=(j&&j.bills)||[];
+    document.getElementById('pay-bills').innerHTML=
+      '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Open bills, oldest first \u2014 payment fills them in this order.</div>'
+      +MAT.payBills.map(function(b){
+        return '<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid #f0f0f0;">'
+          +'<span>'+b.date+' <span style="color:var(--muted);">('+b.ageDays+'d)</span></span>'
+          +'<span style="font-weight:700;">'+matMoney(b.balance)+'</span></div>';
+      }).join('');
+    ptPreviewAllocation();
+  }).catch(function(e){
+    document.getElementById('pay-bills').innerHTML='<div style="color:var(--red);font-size:12px;">'+e.message+'</div>';
+  });
+}
+
+/* Show exactly which bills the money will clear before it is committed —
+   the allocation is the part people want to see, not trust blindly. */
+function ptPreviewAllocation(){
+  var amt=matNum(document.getElementById('pay-amount').value);
+  var box=document.getElementById('pay-preview');
+  if(!box) return;
+  if(amt<=0){ box.innerHTML=''; return; }
+  var left=amt, hits=[];
+  MAT.payBills.forEach(function(b){
+    if(left<=0.005) return;
+    var take=Math.min(left,b.balance);
+    hits.push({b:b,take:take,clears:take>=b.balance-0.005});
+    left-=take;
+  });
+  box.innerHTML='<div style="background:#F4FAF5;border:1px solid #cfe3d4;border-radius:8px;padding:8px;">'
+    +hits.map(function(h){
+      return '<div>'+(h.clears?'\u2713':'\u00b7')+' '+h.b.date+' \u2014 '+matMoney(h.take)
+        +(h.clears?' <span style="color:var(--green);">cleared</span>':' <span style="color:var(--muted);">part</span>')+'</div>';
+    }).join('')
+    +(left>0.005?'<div style="color:#1565C0;margin-top:4px;">'+matMoney(left)+' left over \u2014 held as an advance</div>':'')
+    +'</div>';
+}
+
+function ptSavePayment(){
+  var amt=matNum(document.getElementById('pay-amount').value);
+  var date=document.getElementById('pay-date').value;
+  var method=document.getElementById('pay-method').value;
+  if(amt<=0){ showToast('Enter the amount'); return; }
+  if(!date){ showToast('Pick a date'); return; }
+  if(!method){ showToast('Select where it was paid from'); return; }
+
+  ptPost('MATERIAL_PAYMENT',{
+    id:'PAY'+Date.now().toString().slice(-10),
+    date:date, party:MAT.payParty, amount:amt,
+    method:method, ref:document.getElementById('pay-ref').value.trim()
+  }).then(function(){
+    closeModal('modal-pay');
+    showToast('Payment recorded \u2014 '+matMoney(amt));
+    ptLoadCreditors();
+  }).catch(function(){ showToast('Could not reach the tracker'); });
+}
+
+/* fill the Settings box on load */
+(function(){
+  var t=setInterval(function(){
+    var el=document.getElementById('pt-url-input');
+    if(!el) return;
+    clearInterval(t);
+    el.value=localStorage.getItem(LS_PT_URL)||'';
+  },300);
+})();
+</script>
 </body>
 </html>
