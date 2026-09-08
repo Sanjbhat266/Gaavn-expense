@@ -165,7 +165,7 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
-      <span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v32</span>
+      <span id="sync-chip" onclick="cloudSync(false)" title="Tap to sync" style="font-size:11px;color:var(--cream);opacity:0.85;font-weight:700;margin-right:8px;cursor:pointer;">&#9729;</span><span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v33</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
@@ -280,6 +280,21 @@ datalist{display:none;}
           <button class="btn btn-primary btn-sm" onclick="saveSheetUrl()">Save</button>
           <button class="btn btn-secondary btn-sm" onclick="testSheetUrl()">Test</button>
           <button class="btn btn-secondary btn-sm" onclick="showAppsScript()">View Script</button>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:10px;">
+      <div class="card-head"><div class="card-title">&#9729; Cloud Sync</div></div>
+      <div class="card-body">
+        <div id="sync-status-box" style="margin-bottom:10px;"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" onclick="cloudSync(false)">&#8635; Sync now</button>
+          <button class="btn btn-secondary btn-sm" onclick="forcePushAll()">&#8593; Upload all from this device</button>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.6;">
+          Every device keeps its own copy and the Google Sheet is the master. If two devices show
+          different totals, tap <b>Sync now</b> on both. If one device was used offline, tap
+          <b>Upload all from this device</b> there first, then <b>Sync now</b> on the other.
         </div>
       </div>
     </div>
@@ -673,6 +688,316 @@ var PICONS={bank:'&#127970;',card:'&#128179;',cash:'&#128181;',upi:'&#128241;',o
 var S={role:null,expenses:[],cats:[],items:{},parties:[],pm:[],url:'',dashFilter:'all',gstMode:'none'};
 var _pr=null,_pe='';
 
+/* ══════════════════════════════════════════════════════════════════════
+   v33 — CLOUD SYNC ENGINE
+   Fixes the "mobile shows lower totals than desktop" problem.
+
+   Why it happened (v32):
+   1. Every device kept its own private copy in localStorage. The Google
+      Sheet was written to but only read back from a button buried in the
+      Import screen, so two devices drifted apart forever.
+   2. Pushes to the Sheet were fire-and-forget: `try{await fetch(..)}catch(e){}`.
+      A flaky mobile connection, or the 6-parallel-request burst fired by
+      "Import all", silently dropped rows. They existed on the device that
+      created them and nowhere else.
+   3. Sheet dates came back as UTC ISO strings ("2026-08-31T18:30:00.000Z"
+      = 1 Sep 2026 IST). `.slice(0,10)` moved every synced expense back one
+      day, pushing some into the previous month's report.
+   4. Deletes and de-duplication were local-only, so the next load from the
+      Sheet resurrected them.
+   5. Payment-method ids were minted per device, so the same method had
+      different ids on mobile vs desktop.
+   6. localStorage writes were unguarded — a full quota failed silently.
+   ══════════════════════════════════════════════════════════════════════ */
+var LS_OUTBOX='gf_outbox', LS_TOMB='gf_tomb', LS_SYNCAT='gf_syncat';
+var _syncing=false, _flushing=false, _lastPull=null;
+
+/* ── safe storage ──────────────────────────────────────────────────── */
+function lsGetRaw(k,d){try{var v=localStorage.getItem(k);return v==null?d:v;}catch(e){return d;}}
+function lsSet(k,v){
+  try{localStorage.setItem(k,v);return true;}
+  catch(err){
+    console.error('[storage] write failed: '+k,err);
+    try{showToast('⚠ Device storage full — change NOT saved locally. Sync to Sheet from another device.');}catch(e){}
+    return false;
+  }
+}
+function jparse(s,d){try{var v=JSON.parse(s);return v==null?d:v;}catch(e){return d;}}
+function saveExpenses(){return lsSet(LS_EXP,JSON.stringify(S.expenses));}
+
+/* ── date + amount normalisation ───────────────────────────────────── */
+function normDate(v){
+  if(v==null||v==='')return '';
+  if(v instanceof Date&&!isNaN(v))return v.getFullYear()+'-'+pad(v.getMonth()+1)+'-'+pad(v.getDate());
+  var s=String(v).trim();
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;                      // already clean
+  if(/^\d{4}-\d{2}-\d{2}T/.test(s)){                              // UTC ISO from Apps Script
+    var d=new Date(s);
+    if(!isNaN(d))return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+    return s.slice(0,10);
+  }
+  var m=s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$/); // dd/mm/yyyy
+  if(m){var y=m[3].length===2?('20'+m[3]):m[3];return y+'-'+pad(parseInt(m[2],10))+'-'+pad(parseInt(m[1],10));}
+  var d2=new Date(s);
+  if(!isNaN(d2))return d2.getFullYear()+'-'+pad(d2.getMonth()+1)+'-'+pad(d2.getDate());
+  return s.slice(0,10);
+}
+function normAmt(v){
+  if(typeof v==='number')return isFinite(v)?v:0;
+  var n=parseFloat(String(v==null?'':v).replace(/[^0-9.\-]/g,''));
+  return isFinite(n)?n:0;
+}
+
+/* ── payment methods: same id on every device ──────────────────────── */
+function pmSlug(n){return 'pm_'+String(n||'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');}
+function pmEnsure(name){
+  name=String(name||'').trim();
+  if(!name)return '';
+  var pm=S.pm.find(function(p){return (p.name||'').toLowerCase()===name.toLowerCase();});
+  if(pm)return pm.id;
+  var t=/cash/i.test(name)?'cash':(/card|cc|credit/i.test(name)?'card':(/bank|upi|gpay|phonepe|paytm|neft|imps/i.test(name)?'bank':'other'));
+  pm={id:pmSlug(name),name:name,type:t};
+  S.pm.push(pm);
+  lsSet(LS_PM,JSON.stringify(S.pm));
+  if(typeof populatePMDropdown==='function')populatePMDropdown();
+  return pm.id;
+}
+
+/* ── tombstones: a delete here must not come back on the next pull ── */
+function tombs(){return jparse(lsGetRaw(LS_TOMB,'[]'),[]);}
+function tombAdd(id){
+  if(!id)return;
+  var t=tombs();
+  if(t.indexOf(id)<0){t.push(id);if(t.length>3000)t=t.slice(-3000);lsSet(LS_TOMB,JSON.stringify(t));}
+}
+
+/* ── outbox: nothing is lost when the network drops ────────────────── */
+function outbox(){return jparse(lsGetRaw(LS_OUTBOX,'[]'),[]);}
+function outboxSave(a){lsSet(LS_OUTBOX,JSON.stringify(a));updateSyncChip();}
+function outboxAdd(op){ outboxAddMany([op]); }
+function outboxAddMany(ops){
+  if(!ops||!ops.length)return;
+  var idx={}; ops.forEach(function(o){idx[o.id]=1;});
+  var a=outbox().filter(function(x){return !idx[x.id];});
+  outboxSave(a.concat(ops));
+}
+function pendingCount(){return outbox().length;}
+
+/* ── transport ─────────────────────────────────────────────────────── */
+function expQuery(exp){
+  var pm=S.pm.find(function(p){return p.id===exp.payMethodId;});
+  return new URLSearchParams({
+    action:'logExpense', expId:exp.id||'', date:exp.date||'', party:exp.party||'',
+    category:exp.category||'', item:exp.item||'', state:exp.state||'',
+    total:exp.total||0, paid:exp.paid||0, balance:exp.balance||0,
+    gstMode:exp.gstMode||'none', gstRate:exp.gstRate||'', gstAmt:exp.gstAmount||0,
+    baseAmt:exp.baseAmount||0, payMethod:pm?pm.name:'', ref:exp.ref||'',
+    driveLink:exp.driveLink||'', desc:exp.desc||'', role:exp.role||''
+  }).toString();
+}
+async function sheetFetch(qs,timeoutMs){
+  var ctrl=(typeof AbortController!=='undefined')?new AbortController():null;
+  var timer=setTimeout(function(){if(ctrl)ctrl.abort();},timeoutMs||30000);
+  try{
+    var res=await fetch(S.url+'?'+qs, ctrl?{signal:ctrl.signal}:{});
+    var txt=await res.text();
+    return jparse(txt,{error:'bad response'});
+  } finally { clearTimeout(timer); }
+}
+async function pushOne(op){
+  if(op.t==='del'){
+    var r=await sheetFetch('action=deleteExpense&expId='+encodeURIComponent(op.id),20000);
+    if(r&&r.error==='unknown')return 'unsupported';        // old Apps Script deployed
+    return (r&&(r.status==='deleted'||r.status==='notfound'))?'ok':'fail';
+  }
+  var r2=await sheetFetch(expQuery(op.exp),20000);
+  return (r2&&(r2.status==='ok'||r2.status==='updated'))?'ok':'fail';
+}
+
+/* Sends the queue one request at a time. v32 fired the whole import in
+   parallel; Apps Script serialises on a lock and simply dropped the rest. */
+async function flushOutbox(silent){
+  if(_flushing||!S.url)return 0;
+  var q=outbox();
+  if(!q.length){updateSyncChip();return 0;}
+  _flushing=true;
+  var sent=0, left=[], oldScript=false;
+  for(var i=0;i<q.length;i++){
+    var r='fail';
+    try{ r=await pushOne(q[i]); }catch(e){ r='fail'; }
+    if(r==='ok')sent++;
+    else if(r==='unsupported')oldScript=true;               // drop it, tombstone still protects us
+    else left.push(q[i]);
+    if(!silent&&i%10===9)showToast('Uploading… '+(i+1)+'/'+q.length);
+  }
+  _flushing=false;
+  outboxSave(left);
+  if(oldScript&&!silent)showToast('Deletes need the updated Apps Script (Settings → View Script)');
+  if(sent&&!silent)showToast('☁ '+sent+' record(s) pushed to Sheet');
+  return sent;
+}
+
+/* ── pull: one call if the new script is deployed, else month by month ─ */
+async function cloudPull(){
+  if(!S.url)throw new Error('No Sheet URL');
+  var rows=null, oldestMonth=null;
+  try{
+    var all=await sheetFetch('action=getAllExpenses',60000);
+    if(all&&all.expenses&&!all.error)rows=all.expenses;
+  }catch(e){}
+  if(!rows){
+    rows=[];
+    var now=new Date(), months=[];
+    for(var i=0;i<24;i++){
+      var d=new Date(now.getFullYear(),now.getMonth()-i,1);
+      months.push(d.getFullYear()+'-'+pad(d.getMonth()+1));
+    }
+    oldestMonth=months[months.length-1]+'-01';
+    for(var c=0;c<months.length;c+=4){
+      var res=await Promise.all(months.slice(c,c+4).map(function(m){
+        return sheetFetch('action=getExpenses&month='+m,30000).catch(function(){return null;});
+      }));
+      res.forEach(function(r){ if(r&&r.expenses&&r.expenses.length)rows=rows.concat(r.expenses); });
+    }
+  }
+
+  var tset={}; tombs().forEach(function(id){tset[id]=1;});
+  var pend={}; outbox().forEach(function(o){pend[o.id]=1;});
+  var byId={}; S.expenses.forEach(function(e){byId[e.id]=e;});
+  var sheetIds={}, added=0, fixed=0;
+
+  rows.forEach(function(row){
+    var id=String(row['ID']!=null?row['ID']:(row[0]||'')).trim();
+    if(!id)return;
+    sheetIds[id]=1;
+    if(tset[id])return;                                    // deleted on this device
+    var rec={
+      id:id,
+      date:normDate(row['Date']!=null?row['Date']:row[1]),
+      party:String(row['Party']||row[2]||'').trim(),
+      category:String(row['Category']||row[3]||'').trim(),
+      item:String(row['Item']||row[4]||''),
+      state:String(row['State']||row[5]||''),
+      total:normAmt(row['Total']!=null?row['Total']:row[6]),
+      paid:normAmt(row['Paid']!=null?row['Paid']:row[7]),
+      balance:normAmt(row['Balance']!=null?row['Balance']:row[8]),
+      gstMode:row['GST Mode']||row[9]||'none',
+      gstRate:row['GST Rate']||row[10]||'',
+      gstAmount:normAmt(row['GST Amt']!=null?row['GST Amt']:row[11]),
+      baseAmount:normAmt(row['Base Amt']!=null?row['Base Amt']:row[12]),
+      payMethodId:pmEnsure(row['Payment']||row[13]||''),
+      ref:String(row['Ref']||row[14]||''),
+      driveLink:String(row['Drive Link']||row[15]||''),
+      desc:String(row['Description']||row[16]||''),
+      role:row['Role']||row[17]||''
+    };
+    var ex=byId[id];
+    if(!ex){ S.expenses.push(rec); byId[id]=rec; added++; return; }
+    if(pend[id])return;                                    // local edit not uploaded yet — keep ours
+    var changed=(ex.date!==rec.date)||(normAmt(ex.total)!==rec.total)||(normAmt(ex.paid)!==rec.paid)
+      ||((ex.category||'')!==rec.category)||((ex.party||'')!==rec.party)||(!ex.payMethodId&&rec.payMethodId);
+    if(changed){
+      rec.matLines=ex.matLines||[];
+      rec.createdAt=ex.createdAt; rec.updatedAt=ex.updatedAt;
+      S.expenses[S.expenses.indexOf(ex)]=rec;
+      byId[id]=rec; fixed++;
+    } else if(!ex.payMethodId&&rec.payMethodId){ ex.payMethodId=rec.payMethodId; }
+  });
+
+  /* Anything this device has that the Sheet doesn't → queue it for upload.
+     This is what actually closes the gap between the two devices. */
+  var missing=S.expenses.filter(function(e){
+    if(sheetIds[e.id])return false;
+    if(oldestMonth&&e.date&&e.date<oldestMonth)return false;   // outside the window we fetched
+    return true;
+  });
+  outboxAddMany(missing.map(function(e){return {t:'up',id:e.id,exp:e};}));
+
+  /* backfill parties + categories discovered in the Sheet */
+  var pchg=false, cchg=false;
+  S.expenses.forEach(function(e){
+    var pn=(e.party||'').trim();
+    if(pn&&!S.parties.find(function(p){return (p.name||'').toLowerCase()===pn.toLowerCase();})){
+      S.parties.push({id:'p'+Date.now().toString().slice(-8)+Math.random().toString(36).slice(2,5),name:pn,gst:'',address:'',phone:'',email:'',contact:'',createdAt:Date.now()});
+      pchg=true;
+    }
+    var cn=(e.category||'').trim();
+    if(cn&&!S.cats.some(function(c){return (c||'').toLowerCase()===cn.toLowerCase();})){S.cats.push(cn);cchg=true;}
+  });
+  if(pchg){S.parties.sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});lsSet(LS_PARTIES,JSON.stringify(S.parties));}
+  if(cchg){S.cats.sort();lsSet(LS_CAT,JSON.stringify(S.cats));if(typeof populateCatDropdown==='function')populateCatDropdown();}
+
+  S.expenses.sort(function(a,b){return String(b.date||'').localeCompare(String(a.date||''));});
+  saveExpenses();
+  _lastPull={added:added,fixed:fixed,sheetRows:Object.keys(sheetIds).length,queued:missing.length,at:Date.now()};
+  return _lastPull;
+}
+
+/* ── one button that makes both devices agree ──────────────────────── */
+async function cloudSync(silent){
+  if(!S.url){ if(!silent)showToast('Set the Sheet URL in Settings first'); return; }
+  if(_syncing)return;
+  _syncing=true; updateSyncChip('syncing');
+  try{
+    await flushOutbox(true);          // 1. send what we owe
+    var r=await cloudPull();          // 2. take everything the Sheet has
+    await flushOutbox(true);          // 3. send what the pull found missing
+    lsSet(LS_SYNCAT,String(Date.now()));
+    if(typeof renderDashboard==='function')renderDashboard();
+    var rs=document.getElementById('screen-reports');
+    if(rs&&rs.style.display!=='none'&&typeof renderReports==='function')renderReports();
+    if(typeof renderSettings==='function')renderSettings();
+    if(!silent)showToast('☁ Synced · '+S.expenses.length+' records ('+r.added+' new, '+r.queued+' uploaded)');
+  }catch(e){
+    console.error('[sync]',e);
+    if(!silent)showToast('Sync failed — check internet or Sheet URL');
+  }
+  _syncing=false; updateSyncChip();
+}
+
+function forcePushAll(){
+  if(!S.url){showToast('Set the Sheet URL in Settings first');return;}
+  if(!confirm('Upload all '+S.expenses.length+' records from THIS device to the Google Sheet?\n\nRows with the same ID are updated, never duplicated.'))return;
+  outboxAddMany(S.expenses.map(function(e){return {t:'up',id:e.id,exp:e};}));
+  showToast('Queued '+S.expenses.length+' records…');
+  flushOutbox(false).then(function(){updateSyncChip();if(typeof renderSettings==='function')renderSettings();});
+}
+
+function updateSyncChip(state){
+  var el=document.getElementById('sync-chip');
+  if(!el)return;
+  if(state==='syncing'){el.textContent='☁ syncing…';el.style.color='#FFD54F';return;}
+  var p=pendingCount();
+  el.textContent='☁ '+S.expenses.length+(p?' · ⏳'+p:'');
+  el.style.color=p?'#FFB300':'var(--cream)';
+  var at=parseInt(lsGetRaw(LS_SYNCAT,'0'),10)||0;
+  el.title=at?('Last sync: '+new Date(at).toLocaleString('en-IN')+'\nTap to sync now'):'Never synced — tap to sync';
+}
+
+function syncStatusHTML(){
+  var at=parseInt(lsGetRaw(LS_SYNCAT,'0'),10)||0;
+  var p=pendingCount();
+  var h='<div style="font-size:12px;line-height:1.9;">';
+  h+='<div><b>'+S.expenses.length+'</b> records on this device</div>';
+  h+='<div>Last sync: <b>'+(at?new Date(at).toLocaleString('en-IN'):'never')+'</b></div>';
+  h+='<div>Waiting to upload: <b style="color:'+(p?'#E65100':'inherit')+';">'+p+'</b></div>';
+  if(_lastPull)h+='<div style="color:var(--muted);">Sheet had '+_lastPull.sheetRows+' rows · '+_lastPull.added+' pulled in · '+_lastPull.queued+' pushed out</div>';
+  h+='</div>';
+  if(p)h+='<div style="margin-top:8px;font-size:11px;color:#E65100;">'+p+' record(s) have not reached the Sheet yet. Tap <b>Sync now</b> while online — until then this device will show a higher total than the others.</div>';
+  return h;
+}
+
+/* auto-sync: on entry, when the network returns, and when the app is
+   brought back to the foreground after 3+ minutes */
+function _autoSync(){ if(navigator.onLine!==false)cloudSync(true); }
+window.addEventListener('online',function(){setTimeout(_autoSync,1500);});
+document.addEventListener('visibilitychange',function(){
+  if(document.visibilityState!=='visible')return;
+  var at=parseInt(lsGetRaw(LS_SYNCAT,'0'),10)||0;
+  if(Date.now()-at>180000)_autoSync();
+});
+
+
 function _init(){
   S.expenses=JSON.parse(localStorage.getItem(LS_EXP)||'[]');
   S.cats=JSON.parse(localStorage.getItem(LS_CAT)||'null')||DEFAULT_CATS.slice();
@@ -730,7 +1055,8 @@ function enterApp(role){
   S.role=role;
   showOnlyScreen('app-screen');
   populateCatDropdown();populatePMDropdown();populatePartyDL();populateRptFilters();
-  renderDashboard();renderSettings();
+  renderDashboard();renderSettings();updateSyncChip();
+  setTimeout(function(){cloudSync(true);},600);   // pull the Sheet on every entry
   // Ensure the dashboard tab is visible — switchTab sets inline style.display
   // on inner screens which showOnlyScreen doesn't handle (it only toggles .active
   // on top-level .screen elements). Without this, all inner tab screens are hidden.
@@ -769,7 +1095,7 @@ function todayStr(){var d=new Date();return d.getFullYear()+'-'+pad(d.getMonth()
 function monthStart(){var d=new Date();return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-01';}
 function pad(n){return n<10?'0'+n:''+n;}
 function fmtDate(s){if(!s)return'';var p=s.split('-');var m=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return p[2]+' '+m[parseInt(p[1])-1]+' '+p[0];}
-function fmtM(n){return String.fromCharCode(8377)+(parseFloat(n)||0).toLocaleString('en-IN');}
+function fmtM(n){return String.fromCharCode(8377)+(parseFloat(n)||0).toLocaleString('en-IN',{maximumFractionDigits:2});}
 
 function setDashFilter(f,el){
   S.dashFilter=f;
@@ -838,7 +1164,7 @@ function onQuickAttachFile(input){
   showToast('Uploading '+file.name+'…');
   uploadFileToDrive(file,e.id).then(function(url){
     e.driveLink=url;e.updatedAt=Date.now();
-    localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
+    saveExpenses();
     if(S.url)syncToSheet(e);
     showToast('✓ Attached to '+e.party);
     var se=document.getElementById('dash-search');
@@ -1061,7 +1387,7 @@ function saveExpense(){
   } else {
     S.expenses.unshift(obj);
   }
-  localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
+  saveExpenses();
   if(S.url)syncToSheet(obj);
   matAfterSave(obj,editId);
   closeModal('modal-expense');
@@ -1075,7 +1401,10 @@ function deleteExpense(id){
   var _gone=S.expenses.find(function(x){return x.id===id;});
   if(_gone && (_gone.matLines||[]).length) ptPost('PURCHASE_BILL_DELETE',{id:id});
   S.expenses=S.expenses.filter(function(x){return x.id!==id;});
-  localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
+  saveExpenses();
+  tombAdd(id);                                  // never resurrect it on the next pull
+  outboxAdd({t:'del',id:id});
+  if(S.url)flushOutbox(true);
   closeModal('modal-view-exp');
   renderDashboard();
   showToast('Deleted');
@@ -1296,7 +1625,7 @@ function saveNewParty(){
     if(oldName2 && oldName2!==name){
       var renamed=0;
       S.expenses.forEach(function(e){if(e.party===oldName2){e.party=name;renamed++;}});
-      if(renamed>0){localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));renderDashboard();}
+      if(renamed>0){saveExpenses();renderDashboard();}
     }
     S.parties.sort(function(a,b){return a.name.localeCompare(b.name);});
     localStorage.setItem(LS_PARTIES,JSON.stringify(S.parties));
@@ -1539,6 +1868,9 @@ function deletePayMethod(id){
 }
 
 function renderSettings(){
+  var syncBox=document.getElementById('sync-status-box');
+  if(syncBox)syncBox.innerHTML=syncStatusHTML();
+  updateSyncChip();
   var urlInp=document.getElementById('sheet-url-input');
   if(urlInp)urlInp.value=S.url||'';
   populateCatDropdown();
@@ -1768,17 +2100,22 @@ async function testSheetUrl(){
   try{var r=await fetch(S.url+'?action=ping');var d=await r.json();showToast(d.pong?'Connected!':'Unexpected response');}
   catch(e){showToast('Connection failed');}
 }
-async function syncToSheet(exp){
-  if(!S.url)return;
-  var pm=S.pm.find(function(p){return p.id===exp.payMethodId;});
-  var params=new URLSearchParams({action:'logExpense',expId:exp.id,date:exp.date,party:exp.party,category:exp.category,item:exp.item||'',state:exp.state||'',total:exp.total||0,paid:exp.paid||0,balance:exp.balance||0,gstMode:exp.gstMode||'none',gstRate:exp.gstRate||'',gstAmt:exp.gstAmount||0,baseAmt:exp.baseAmount||0,payMethod:pm?pm.name:'',ref:exp.ref||'',driveLink:exp.driveLink||'',desc:exp.desc||'',role:exp.role||''});
-  try{await fetch(S.url+'?'+params.toString());}catch(e){}
+function syncToSheet(exp){
+  // v32 fired this and ignored the result, so a dropped request meant the row
+  // lived on one device only. Now every change is queued and retried until the
+  // Sheet confirms it.
+  if(!exp||!exp.id)return;
+  outboxAdd({t:'up',id:exp.id,exp:JSON.parse(JSON.stringify(exp))});
+  if(S.url)flushOutbox(true);
 }
 async function exportToSheet(){
   if(!S.url){showToast('Set Sheet URL in Settings');return;}
-  var exps=getRptExps();showToast('Exporting '+exps.length+' records...');
-  for(var i=0;i<exps.length;i++)await syncToSheet(exps[i]);
-  showToast('Exported '+exps.length+' records');
+  var exps=getRptExps();
+  if(!exps.length){showToast('No records in the current filter');return;}
+  showToast('Exporting '+exps.length+' records...');
+  outboxAddMany(exps.map(function(e){return {t:'up',id:e.id,exp:e};}));
+  var sent=await flushOutbox(false);
+  showToast(sent+' of '+exps.length+' exported'+(pendingCount()?' — '+pendingCount()+' still queued':''));
 }
 
 function downloadExcel(){
@@ -1829,8 +2166,14 @@ function deduplicateExpenses(){
   if(removed===0){showToast('No duplicates found');return;}
   var ok=confirm('Found '+removed+' duplicate expense(s).\nRemove them now?\n\n(Keeps the first entry of each duplicate group)');
   if(!ok)return;
+  var keptIds={},_delQ=[];deduped.forEach(function(e){keptIds[e.id]=1;});
+  S.expenses.forEach(function(e){
+    if(!keptIds[e.id]){tombAdd(e.id);_delQ.push({t:'del',id:e.id});}
+  });
+  outboxAddMany(_delQ);
   S.expenses=deduped;
-  localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
+  saveExpenses();
+  if(S.url)flushOutbox(true);
   renderDashboard();
   renderReports();
   showToast('Removed '+removed+' duplicate(s). Total corrected.');
@@ -1851,11 +2194,17 @@ function getAppsScript(){
     '// GAAVN FRESH Expense Tracker - Google Apps Script',
     '// Deploy: Execute as Me | Access: Anyone',
     'var SS_ID=SpreadsheetApp.getActiveSpreadsheet().getId();',
-    'function doGet(e){try{var a=e.parameter.action||"";if(a=="ping")return j({pong:true});if(a=="logExpense")return logExp(e.parameter);if(a=="getExpenses")return getExps(e.parameter);return j({error:"unknown"});}catch(err){return j({error:err.message});}}',
+    'function doGet(e){try{var a=e.parameter.action||"";if(a=="ping")return j({pong:true});if(a=="logExpense")return logExp(e.parameter);if(a=="getExpenses")return getExps(e.parameter);if(a=="getAllExpenses")return getAll();if(a=="deleteExpense")return delExp(e.parameter);return j({error:"unknown"});}catch(err){return j({error:err.message});}}',
     'function j(o){return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);}',
     'function getSheet(date){var ss=SpreadsheetApp.openById(SS_ID);var m=(date||"").slice(0,7)||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"yyyy-MM");var name="Expenses_"+m;var sh=ss.getSheetByName(name)||ss.insertSheet(name);if(sh.getLastRow()===0){var h=["ID","Date","Party","Category","Item","State","Total","Paid","Balance","GST Mode","GST Rate","GST Amt","Base Amt","Payment","Ref","Drive Link","Description","Role","Synced"];sh.appendRow(h);sh.getRange(1,1,1,h.length).setFontWeight("bold").setBackground("#1A3A1F").setFontColor("#fff");sh.setFrozenRows(1);}return sh;}',
     'function logExp(p){var lock=LockService.getScriptLock();try{lock.waitLock(30000);}catch(e){return j({error:"busy, try again"});}try{var sh=getSheet(p.date);var now=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"dd/MM/yyyy HH:mm");var row=[p.expId,p.date,p.party,p.category,p.item||"",p.state||"",+p.total||0,+p.paid||0,+p.balance||0,p.gstMode||"none",p.gstRate||"",+p.gstAmt||0,+p.baseAmt||0,p.payMethod||"",p.ref||"",p.driveLink||"",p.desc||"",p.role||"",now];var data=sh.getDataRange().getValues();for(var r=1;r<data.length;r++){if(String(data[r][0])===String(p.expId)){sh.getRange(r+1,1,1,row.length).setValues([row]);sh.getRange(r+1,1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"updated"});}}sh.appendRow(row);sh.getRange(sh.getLastRow(),1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"ok"});}finally{lock.releaseLock();}}',
-    'function getExps(p){var ss=SpreadsheetApp.openById(SS_ID);var month=p.month||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"yyyy-MM");var shName="Expenses_"+month;var sh=ss.getSheetByName(shName);if(!sh)return j({expenses:[],month:month});var data=sh.getDataRange().getValues();if(data.length<2)return j({expenses:[],month:month});var headers=data[0];var rows=data.slice(1).map(function(r){var o={};headers.forEach(function(h,i){o[h]=r[i];});return o;});return j({expenses:rows,month:month,count:rows.length});}',
+    '// Dates are returned as plain yyyy-MM-dd. Returning raw Date cells made them',
+    '// UTC ISO strings, which shifted every expense back one day in IST.',
+    'function fmtd(v){if(Object.prototype.toString.call(v)==="[object Date]")return Utilities.formatDate(v,Session.getScriptTimeZone(),"yyyy-MM-dd");return String(v||"").slice(0,10);}',
+    'function rowsOf(sh){var data=sh.getDataRange().getValues();if(data.length<2)return [];var headers=data[0];return data.slice(1).map(function(r){var o={};headers.forEach(function(h,i){o[h]=(h=="Date")?fmtd(r[i]):r[i];});return o;}).filter(function(o){return o.ID!==""&&o.ID!=null;});}',
+    'function getExps(p){var ss=SpreadsheetApp.openById(SS_ID);var month=p.month||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"yyyy-MM");var sh=ss.getSheetByName("Expenses_"+month);if(!sh)return j({expenses:[],month:month});var rows=rowsOf(sh);return j({expenses:rows,month:month,count:rows.length});}',
+    'function getAll(){var ss=SpreadsheetApp.openById(SS_ID);var out=[];ss.getSheets().forEach(function(sh){if(sh.getName().indexOf("Expenses_")!==0)return;out=out.concat(rowsOf(sh));});return j({expenses:out,count:out.length});}',
+    'function delExp(p){var lock=LockService.getScriptLock();try{lock.waitLock(30000);}catch(e){return j({error:"busy"});}try{var ss=SpreadsheetApp.openById(SS_ID);var id=String(p.expId||"");var found=false;ss.getSheets().forEach(function(sh){if(found||sh.getName().indexOf("Expenses_")!==0)return;var data=sh.getDataRange().getValues();for(var r=data.length-1;r>=1;r--){if(String(data[r][0])===id){sh.deleteRow(r+1);found=true;break;}}});return j({status:found?"deleted":"notfound"});}finally{lock.releaseLock();}}',
     'function doPost(e){try{var p=JSON.parse(e.postData.contents);if((p.action||"")=="uploadDoc")return uploadDoc(p);return j({error:"unknown"});}catch(err){return j({error:err.message});}}',
     'function uploadDoc(p){var fs=DriveApp.getFoldersByName("Gaavn Expense Docs");var folder=fs.hasNext()?fs.next():DriveApp.createFolder("Gaavn Expense Docs");var bytes=Utilities.base64Decode(p.data);var blob=Utilities.newBlob(bytes,p.mimeType||"application/octet-stream",((p.expId||"doc")+"_"+(p.filename||"file")));var file=folder.createFile(blob);file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW);return j({url:file.getUrl(),id:file.getId()});}',
   ].join('\n');
@@ -1902,7 +2251,7 @@ function showEditPartyName(expId){
   }
   // Just update this one expense
   e.party=newName;
-  localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
+  saveExpenses();
   closeModal('modal-view-exp');
   renderDashboard();
   showToast('Party name updated');
@@ -1917,7 +2266,7 @@ function bulkRenameParty(oldName, newName){
   // Also update in parties list
   var p=S.parties.find(function(x){return x.name===oldName;});
   if(p)p.name=newName;
-  localStorage.setItem(LS_EXP,JSON.stringify(S.expenses));
+  saveExpenses();
   localStorage.setItem(LS_PARTIES,JSON.stringify(S.parties));
   renderDashboard();renderSettings();
   showToast('Renamed in '+count+' expense(s)');
@@ -1981,127 +2330,20 @@ function viewDayExpenses() {
 
 // ── LOAD EXPENSES FROM SHEET (for desktop with empty localStorage) ────
 async function loadExpensesFromSheet() {
-  if(!S.url) { showToast('Set Sheet URL in Settings first'); return; }
   var prog = document.getElementById('load-exp-progress');
-  if(prog) prog.textContent = 'Loading...';
-
-  try {
-    // Fetch current month and previous month sheets
-    var months = [];
-    var now = new Date();
-    for(var i=0; i<12; i++) {
-      var d = new Date(now.getFullYear(), now.getMonth()-i, 1);
-      var m = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
-      months.push(m);
-    }
-
-    var loaded = 0;
-    var _pmchg=false;
-    for(var mi=0; mi<months.length; mi++) {
-      var month = months[mi];
-      try {
-        var res = await fetch(S.url+'?action=getExpenses&month='+month);
-        var json = await res.json();
-        if(json.expenses && json.expenses.length) {
-          json.expenses.forEach(function(row) {
-            var id = row['ID'] || row[0];
-            if(!id || S.expenses.find(function(e){return e.id===id;})) return;
-            var _payName=(row['Payment']||row[13]||'').trim();
-            var pm = S.pm.find(function(p){return (p.name||'').toLowerCase()===_payName.toLowerCase();});
-            if(!pm && _payName){
-              var _t=/cash/i.test(_payName)?'cash':(/card|cc|credit/i.test(_payName)?'card':(/bank|upi|gpay|phonepe|paytm/i.test(_payName)?'bank':'other'));
-              pm={id:'pm'+Date.now().toString().slice(-6)+Math.random().toString(36).slice(2,5),name:_payName,type:_t};
-              S.pm.push(pm); _pmchg=true;
-            }
-            S.expenses.push({
-              id: id,
-              date: (row['Date']||row[1]||'').slice(0,10),
-              party: row['Party']||row[2]||'',
-              category: row['Category']||row[3]||'',
-              item: row['Item']||row[4]||'',
-              state: row['State']||row[5]||'',
-              total: parseFloat(row['Total']||row[6])||0,
-              paid: parseFloat(row['Paid']||row[7])||0,
-              balance: parseFloat(row['Balance']||row[8])||0,
-              gstMode: row['GST Mode']||row[9]||'none',
-              gstRate: row['GST Rate']||row[10]||'',
-              gstAmount: parseFloat(row['GST Amt']||row[11])||0,
-              baseAmount: parseFloat(row['Base Amt']||row[12])||0,
-              payMethodId: pm?pm.id:'',
-              ref: row['Ref']||row[14]||'',
-              driveLink: row['Drive Link']||row[15]||'',
-              desc: row['Description']||row[16]||'',
-            });
-            var pname=(row['Party']||row[2]||'').trim();
-            if(pname && !S.parties.find(function(p){return (p.name||'').toLowerCase()===pname.toLowerCase();})){
-              S.parties.push({id:'p'+Date.now().toString().slice(-8)+Math.random().toString(36).slice(2,5),name:pname,gst:'',address:'',phone:'',email:'',contact:'',createdAt:Date.now()});
-            }
-            loaded++;
-          });
-        }
-      } catch(e) {}
-    }
-
-    // Backfill party suggestions from every known expense (covers rows that
-    // were imported earlier and skipped by the de-dup check above), so paying
-    // an existing customer shows their name in the party dropdown.
-    var _pchg=false;
-    S.expenses.forEach(function(e){
-      var pn=(e.party||'').trim();
-      if(pn && !S.parties.find(function(p){return (p.name||'').toLowerCase()===pn.toLowerCase();})){
-        S.parties.push({id:'p'+Date.now().toString().slice(-8)+Math.random().toString(36).slice(2,5),name:pn,gst:'',address:'',phone:'',email:'',contact:'',createdAt:Date.now()});
-        _pchg=true;
-      }
-    });
-    if(_pchg){
-      S.parties.sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});
-      localStorage.setItem(LS_PARTIES, JSON.stringify(S.parties));
-    }
-
-    // Persist any payment methods discovered during import (created above).
-    if(typeof _pmchg!=='undefined' && _pmchg){
-      localStorage.setItem(LS_PM, JSON.stringify(S.pm));
-      if(typeof populatePMDropdown==='function') populatePMDropdown();
-    }
-
-    // Backfill CATEGORIES from every known expense, so categories that only
-    // exist in imported data (e.g. "ADMIN CONSUMABLES") appear in the dropdown.
-    var _cchg=false;
-    S.expenses.forEach(function(e){
-      var cn=(e.category||'').trim();
-      if(cn && !S.cats.some(function(c){return (c||'').toLowerCase()===cn.toLowerCase();})){
-        S.cats.push(cn);
-        _cchg=true;
-      }
-    });
-    if(_cchg){
-      S.cats.sort();
-      localStorage.setItem(LS_CAT, JSON.stringify(S.cats));
-      if(typeof populateCatDropdown==='function') populateCatDropdown();
-    }
-
-    if(loaded > 0) {
-      localStorage.setItem(LS_EXP, JSON.stringify(S.expenses));
-      S.parties.sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});
-      localStorage.setItem(LS_PARTIES, JSON.stringify(S.parties));
-      if(prog) prog.textContent = '✓ '+loaded+' expenses loaded!';
-      // Refresh the status banner
-      var statusEl = document.getElementById('import-exp-status');
-      if(statusEl) {
-        statusEl.style.background = 'var(--gl)';
-        statusEl.style.border = '1px solid var(--green)';
-        statusEl.innerHTML = '<span style="color:var(--green);">✓ <b>'+S.expenses.length+' expenses loaded</b> — ready to compare against statement.</span>';
-      }
-      renderDashboard();
-      showToast('✓ Loaded '+loaded+' expenses from Sheet');
-    } else {
-      if(prog) prog.textContent = 'No data found — check Sheet URL in Settings';
-      showToast('No expenses found in Sheet');
-    }
-  } catch(err) {
-    if(prog) prog.textContent = 'Failed — check internet connection';
-    showToast('Failed to load from Sheet');
+  if(!S.url){ if(prog)prog.textContent='Set the Sheet URL in Settings first'; showToast('Set Sheet URL in Settings first'); return; }
+  if(prog) prog.textContent = 'Syncing with Google Sheet…';
+  var before = S.expenses.length;
+  await cloudSync(true);
+  var gained = S.expenses.length - before;
+  if(prog) prog.textContent = '\u2713 '+S.expenses.length+' expenses on this device ('+gained+' new)';
+  var statusEl = document.getElementById('import-exp-status');
+  if(statusEl){
+    statusEl.style.background='var(--gl)';
+    statusEl.style.border='1px solid var(--green)';
+    statusEl.innerHTML='<span style="color:var(--green);">\u2713 <b>'+S.expenses.length+' expenses loaded</b> \u2014 ready to compare against statement.</span>';
   }
+  showToast('\u2601 Synced \u00b7 '+S.expenses.length+' records');
 }
 
 // ── IMPORT BANK/CC STATEMENT ──────────────────────────────────────────
@@ -2841,7 +3083,7 @@ function saveImportItem() {
   };
 
   S.expenses.push(exp);
-  localStorage.setItem(LS_EXP, JSON.stringify(S.expenses));
+  saveExpenses();
   syncToSheet(exp);
 
   // Learn: this description pattern maps to this party/category
@@ -2928,7 +3170,7 @@ function importAllMissing() {
     var el = document.getElementById('missing-item-'+idx);
     if(el) el.style.opacity = '0.4';
   });
-  localStorage.setItem(LS_EXP, JSON.stringify(S.expenses));
+  saveExpenses();
   renderDashboard();
   showToast('✓ Added '+added+' auto-categorized expenses');
   if(_missingTxns.some(function(t){return !t.autoCat;})) {
