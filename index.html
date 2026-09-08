@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="app-version" content="35">
 <title>Gaavn Fresh - Expense Tracker</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -102,6 +103,12 @@ select.form-input{appearance:none;background-image:url("data:image/svg+xml,%3Csv
 .report-row:last-child{border-bottom:none;}
 .report-val{font-weight:700;color:var(--amber);}
 datalist{display:none;}
+.update-bar{position:fixed;left:0;right:0;bottom:64px;z-index:1200;background:var(--blue);color:#fff;padding:11px 14px;display:none;align-items:center;gap:10px;font-size:13px;font-weight:600;box-shadow:0 -2px 12px rgba(0,0,0,0.18);}
+.update-bar.show{display:flex;}
+.update-bar button{background:#fff;color:var(--blue);border:none;border-radius:7px;padding:7px 14px;font-size:12px;font-weight:800;cursor:pointer;flex-shrink:0;font-family:inherit;}
+.update-bar .ub-x{background:transparent;color:#fff;opacity:0.7;padding:6px 4px;font-size:16px;}
+.sync-warn{background:var(--al);border:1.5px solid var(--amber);border-radius:10px;padding:9px 12px;margin-bottom:10px;font-size:12px;color:#8A5A00;line-height:1.5;cursor:pointer;display:none;}
+.sync-warn.show{display:block;}
 .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--cream);padding:10px 20px;border-radius:24px;font-size:13px;font-weight:600;z-index:999;opacity:0;transition:opacity 0.3s;pointer-events:none;white-space:nowrap;}
 .toast.show{opacity:1;}
 .section-hdr{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.8px;margin:16px 0 8px;display:flex;align-items:center;justify-content:space-between;}
@@ -165,17 +172,18 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
-      <span id="sync-chip" onclick="cloudSync(false)" title="Tap to sync" style="font-size:11px;color:var(--cream);opacity:0.85;font-weight:700;margin-right:8px;cursor:pointer;">&#9729;</span><span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v33</span>
+      <span id="sync-chip" onclick="cloudSync(false)" title="Tap to sync" style="font-size:11px;color:var(--cream);opacity:0.85;font-weight:700;margin-right:8px;cursor:pointer;">&#9729;</span><span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v35</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
 
   <div class="screen active main" id="screen-dashboard">
     <div style="margin-bottom:10px;">
-      <input type="search" id="dash-search" placeholder="\U0001F50D  Search item, party, category, invoice #..." oninput="onDashSearch()" class="form-input" style="width:100%;">
+      <input type="search" id="dash-search" placeholder="&#128269;  Search item, party, category, invoice #..." oninput="onDashSearch()" class="form-input" style="width:100%;">
     </div>
     <div id="dash-search-results" style="display:none;"></div>
     <input type="file" id="quick-attach-file" accept="image/*,application/pdf" style="display:none;" onchange="onQuickAttachFile(this)">
+    <div class="sync-warn" id="sync-warn" onclick="cloudSync(false)"></div>
     <div class="summary-row" id="dash-summary"></div>
     <div class="filter-bar" id="dash-filter-bar">
       <div class="filter-chip active" onclick="setDashFilter('all',this)">All</div>
@@ -290,11 +298,13 @@ datalist{display:none;}
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn btn-primary btn-sm" onclick="cloudSync(false)">&#8635; Sync now</button>
           <button class="btn btn-secondary btn-sm" onclick="forcePushAll()">&#8593; Upload all from this device</button>
+          <button class="btn btn-secondary btn-sm" onclick="checkForUpdate(false)">&#8635; Check for app update</button>
         </div>
         <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.6;">
-          Every device keeps its own copy and the Google Sheet is the master. If two devices show
-          different totals, tap <b>Sync now</b> on both. If one device was used offline, tap
-          <b>Upload all from this device</b> there first, then <b>Sync now</b> on the other.
+          Syncing is automatic: every 2 minutes while the app is open, whenever it returns to the
+          foreground, and immediately after every entry. Anything that fails to upload is retried on
+          its own until the Sheet accepts it. The buttons above are only needed if you want to force
+          it right now.
         </div>
       </div>
     </div>
@@ -677,6 +687,11 @@ datalist{display:none;}
   </div>
 </div>
 
+<div class="update-bar" id="update-bar">
+  <span style="flex:1;" id="update-msg">A newer version is available.</span>
+  <button onclick="applyUpdate()">Update</button>
+  <button class="ub-x" onclick="dismissUpdate()">&times;</button>
+</div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -773,7 +788,7 @@ function tombAdd(id){
 
 /* ── outbox: nothing is lost when the network drops ────────────────── */
 function outbox(){return jparse(lsGetRaw(LS_OUTBOX,'[]'),[]);}
-function outboxSave(a){lsSet(LS_OUTBOX,JSON.stringify(a));updateSyncChip();}
+function outboxSave(a){lsSet(LS_OUTBOX,JSON.stringify(a));updateSyncChip();try{renderSyncWarning();}catch(e){}}
 function outboxAdd(op){ outboxAddMany([op]); }
 function outboxAddMany(ops){
   if(!ops||!ops.length)return;
@@ -838,26 +853,41 @@ async function flushOutbox(silent){
 }
 
 /* ── pull: one call if the new script is deployed, else month by month ─ */
-async function cloudPull(){
+function monthKey(d){return d.getFullYear()+'-'+pad(d.getMonth()+1);}
+function recentMonths(n){
+  var now=new Date(), out=[];
+  for(var i=0;i<n;i++)out.push(monthKey(new Date(now.getFullYear(),now.getMonth()-i,1)));
+  return out;
+}
+async function fetchMonths(months){
+  var rows=[];
+  for(var c=0;c<months.length;c+=4){
+    var res=await Promise.all(months.slice(c,c+4).map(function(m){
+      return sheetFetch('action=getExpenses&month='+m,30000).catch(function(){return null;});
+    }));
+    res.forEach(function(r){ if(r&&r.expenses&&r.expenses.length)rows=rows.concat(r.expenses); });
+  }
+  return rows;
+}
+
+/* scope: 'all' (default) or an array of 'YYYY-MM'. The light scope is what
+   the background heartbeat uses — one cheap call instead of the whole book. */
+async function cloudPull(scope){
   if(!S.url)throw new Error('No Sheet URL');
-  var rows=null, oldestMonth=null;
-  try{
-    var all=await sheetFetch('action=getAllExpenses',60000);
-    if(all&&all.expenses&&!all.error)rows=all.expenses;
-  }catch(e){}
-  if(!rows){
-    rows=[];
-    var now=new Date(), months=[];
-    for(var i=0;i<24;i++){
-      var d=new Date(now.getFullYear(),now.getMonth()-i,1);
-      months.push(d.getFullYear()+'-'+pad(d.getMonth()+1));
-    }
-    oldestMonth=months[months.length-1]+'-01';
-    for(var c=0;c<months.length;c+=4){
-      var res=await Promise.all(months.slice(c,c+4).map(function(m){
-        return sheetFetch('action=getExpenses&month='+m,30000).catch(function(){return null;});
-      }));
-      res.forEach(function(r){ if(r&&r.expenses&&r.expenses.length)rows=rows.concat(r.expenses); });
+  var rows=null, oldestMonth=null, monthSet=null;
+
+  if(scope&&scope!=='all'){
+    monthSet={}; scope.forEach(function(m){monthSet[m]=1;});
+    rows=await fetchMonths(scope);
+  } else {
+    try{
+      var all=await sheetFetch('action=getAllExpenses',60000);
+      if(all&&all.expenses&&!all.error)rows=all.expenses;
+    }catch(e){}
+    if(!rows){
+      var months=recentMonths(24);
+      oldestMonth=months[months.length-1]+'-01';
+      rows=await fetchMonths(months);
     }
   }
 
@@ -908,7 +938,8 @@ async function cloudPull(){
      This is what actually closes the gap between the two devices. */
   var missing=S.expenses.filter(function(e){
     if(sheetIds[e.id])return false;
-    if(oldestMonth&&e.date&&e.date<oldestMonth)return false;   // outside the window we fetched
+    if(monthSet&&!monthSet[String(e.date||'').slice(0,7)])return false;  // month we didn't fetch
+    if(oldestMonth&&e.date&&e.date<oldestMonth)return false;             // outside the window we fetched
     return true;
   });
   outboxAddMany(missing.map(function(e){return {t:'up',id:e.id,exp:e};}));
@@ -934,23 +965,30 @@ async function cloudPull(){
 }
 
 /* ── one button that makes both devices agree ──────────────────────── */
-async function cloudSync(silent){
+async function cloudSync(silent,scope){
   if(!S.url){ if(!silent)showToast('Set the Sheet URL in Settings first'); return; }
   if(_syncing)return;
   _syncing=true; updateSyncChip('syncing');
   try{
-    await flushOutbox(true);          // 1. send what we owe
-    var r=await cloudPull();          // 2. take everything the Sheet has
-    await flushOutbox(true);          // 3. send what the pull found missing
+    await flushOutbox(true);              // 1. send what we owe
+    var r=await cloudPull(scope||'all');  // 2. take what the Sheet has
+    await flushOutbox(true);              // 3. send what the pull found missing
     lsSet(LS_SYNCAT,String(Date.now()));
-    if(typeof renderDashboard==='function')renderDashboard();
-    var rs=document.getElementById('screen-reports');
-    if(rs&&rs.style.display!=='none'&&typeof renderReports==='function')renderReports();
+    // Repaint only when the data actually moved, so a silent background sync
+    // never yanks the screen while someone is reading it.
+    var changed=(r.added||r.fixed||r.queued);
+    if(changed||!silent){
+      if(typeof renderDashboard==='function'&&!modalOpen())renderDashboard();
+      var rs=document.getElementById('screen-reports');
+      if(rs&&rs.style.display!=='none'&&typeof renderReports==='function')renderReports();
+    }
     if(typeof renderSettings==='function')renderSettings();
-    if(!silent)showToast('☁ Synced · '+S.expenses.length+' records ('+r.added+' new, '+r.queued+' uploaded)');
+    renderSyncWarning();
+    if(!silent)showToast('\u2601 Synced \u00b7 '+S.expenses.length+' records ('+r.added+' new, '+r.queued+' uploaded)');
+    else if(r.added)showToast('\u2601 '+r.added+' new record(s) from another device');
   }catch(e){
     console.error('[sync]',e);
-    if(!silent)showToast('Sync failed — check internet or Sheet URL');
+    if(!silent)showToast('Sync failed \u2014 check internet or Sheet URL');
   }
   _syncing=false; updateSyncChip();
 }
@@ -978,6 +1016,7 @@ function syncStatusHTML(){
   var at=parseInt(lsGetRaw(LS_SYNCAT,'0'),10)||0;
   var p=pendingCount();
   var h='<div style="font-size:12px;line-height:1.9;">';
+  h+='<div>App version: <b>v'+APP_VERSION+'</b> \u00b7 <span style="color:var(--green);">auto-sync on</span></div>';
   h+='<div><b>'+S.expenses.length+'</b> records on this device</div>';
   h+='<div>Last sync: <b>'+(at?new Date(at).toLocaleString('en-IN'):'never')+'</b></div>';
   h+='<div>Waiting to upload: <b style="color:'+(p?'#E65100':'inherit')+';">'+p+'</b></div>';
@@ -987,14 +1026,159 @@ function syncStatusHTML(){
   return h;
 }
 
-/* auto-sync: on entry, when the network returns, and when the app is
-   brought back to the foreground after 3+ minutes */
-function _autoSync(){ if(navigator.onLine!==false)cloudSync(true); }
-window.addEventListener('online',function(){setTimeout(_autoSync,1500);});
+/* ══════════════════════════════════════════════════════════════════════
+   v34 — SELF-UPDATER
+   GitHub Pages lets the browser cache index.html, so an old build can keep
+   running for hours after a deploy (the reason v32 was still showing while
+   incognito had v33). The app now asks the server what the current version
+   is and offers a one-tap, cache-busting reload.
+   ══════════════════════════════════════════════════════════════════════ */
+var APP_VERSION=35, _remoteVersion=null;
+
+async function checkForUpdate(silent){
+  try{
+    var u=location.pathname+'?_cb='+Date.now();
+    var res=await fetch(u,{cache:'no-store'});
+    if(!res.ok)return;
+    var txt=await res.text();
+    var m=txt.match(/name=["']app-version["'][^>]*content=["'](\d+)["']/i);
+    if(!m)return;
+    var remote=parseInt(m[1],10);
+    _remoteVersion=remote;
+    if(remote>APP_VERSION){
+      var msg=document.getElementById('update-msg');
+      if(msg)msg.textContent='Version '+remote+' is available (you have '+APP_VERSION+').';
+      var bar=document.getElementById('update-bar');
+      if(bar)bar.classList.add('show');
+    } else if(!silent){
+      showToast('\u2713 You are on the latest version (v'+APP_VERSION+')');
+    }
+  }catch(e){ if(!silent)showToast('Could not check for updates'); }
+}
+function applyUpdate(){
+  // localStorage is per-origin, not per-URL, so nothing is lost by the reload.
+  try{ if(window.caches&&caches.keys)caches.keys().then(function(k){k.forEach(function(n){caches.delete(n);});}); }catch(e){}
+  location.replace(location.pathname+'?v='+(_remoteVersion||Date.now()));
+}
+function dismissUpdate(){var b=document.getElementById('update-bar');if(b)b.classList.remove('show');}
+
+/* Applies a new build on its own, but only at a safe moment: nothing waiting
+   to upload, no modal open, and the user idle — so a reload can never
+   interrupt data entry or lose an unsent expense. */
+function maybeAutoUpdate(){
+  if(!_remoteVersion||_remoteVersion<=APP_VERSION)return;
+  if(modalOpen())return;
+  if(pendingCount()){ if(canSyncNow())flushOutbox(true); return; }
+  if(Date.now()-_lastAction<15000)return;
+  var onRole=!document.getElementById('app-screen').classList.contains('active');
+  if(onRole){ applyUpdate(); return; }          // not signed in yet: just do it
+  showToast('Updating to v'+_remoteVersion+'\u2026');
+  setTimeout(applyUpdate,1500);
+}
+
+/* ── out-of-sync warning: a device that is behind must say so ───────── */
+function renderSyncWarning(){
+  var el=document.getElementById('sync-warn');
+  if(!el)return;
+  var pend=pendingCount();
+  var at=parseInt(lsGetRaw(LS_SYNCAT,'0'),10)||0;
+  var stale=!at||(Date.now()-at>86400000);
+  if(!pend&&!stale){el.classList.remove('show');return;}
+  el.innerHTML=pend
+    ? '\u23f3 <b>'+pend+' record(s) on this device have not reached the Google Sheet.</b> Totals here will not match your other devices until they do. Tap to sync now.'
+    : '\u2601 <b>This device has not synced'+(at?(' since '+new Date(at).toLocaleDateString('en-IN')):' yet')+'.</b> Its totals may be out of date. Tap to sync now.';
+  el.classList.add('show');
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   v35 — BACKGROUND SYNC ENGINE (no tapping required)
+
+   A heartbeat runs every 20s while the app is open and visible:
+     · anything queued  -> retried immediately, backing off 15s\u219230s\u219260s\u2192…
+     · every 2 minutes  -> light pull of this month + last month (one cheap call)
+     · every 30 minutes -> full pull of every month
+   Plus: on app entry, when the network comes back, when the app returns to
+   the foreground, when the Reports tab is opened, and on the way out.
+   ══════════════════════════════════════════════════════════════════════ */
+var _lastFullPull=0, _lastLitePull=0, _retryAt=0, _retryStep=15000, _hbTimer=null, _lastAction=Date.now();
+var HB_TICK=20000, LITE_EVERY=120000, FULL_EVERY=1800000;
+
+function modalOpen(){ return !!document.querySelector('.modal-overlay.open'); }
+function canSyncNow(){
+  return !!S.url && !_syncing && !_flushing
+    && navigator.onLine!==false
+    && document.visibilityState==='visible'
+    && !modalOpen();                      // never interrupt data entry
+}
+
+async function syncHeartbeat(){
+  if(!canSyncNow())return;
+  var now=Date.now();
+
+  // 1. unsent rows: retry with backoff until the Sheet accepts them
+  if(pendingCount()){
+    if(now<_retryAt)return;
+    _retryAt=now+_retryStep;
+    _retryStep=Math.min(_retryStep*2,180000);
+    var sent=await flushOutbox(true);
+    if(!pendingCount()){ _retryStep=15000; _retryAt=0; renderSyncWarning(); if(sent)updateSyncChip(); }
+    return;
+  }
+  _retryStep=15000;
+
+  // 2. full pull every half hour
+  if(now-_lastFullPull>FULL_EVERY){
+    _lastFullPull=now; _lastLitePull=now;
+    await cloudSync(true,'all');
+    return;
+  }
+  // 3. light pull every two minutes — catches what the other device just saved
+  if(now-_lastLitePull>LITE_EVERY){
+    _lastLitePull=now;
+    await cloudSync(true,recentMonths(2));
+  }
+}
+
+function startSyncEngine(){
+  if(_hbTimer)return;
+  _hbTimer=setInterval(function(){ syncHeartbeat(); },HB_TICK);
+}
+
+function syncNowIfStale(ms,scope){
+  if(!canSyncNow())return;
+  var at=parseInt(lsGetRaw(LS_SYNCAT,'0'),10)||0;
+  if(Date.now()-at>ms)cloudSync(true,scope||'all');
+}
+
+['pointerdown','keydown'].forEach(function(ev){
+  document.addEventListener(ev,function(){_lastAction=Date.now();},true);
+});
+
+window.addEventListener('online',function(){
+  _retryAt=0; _retryStep=15000;
+  setTimeout(function(){ if(canSyncNow())cloudSync(true,'all'); },1500);
+});
+
 document.addEventListener('visibilitychange',function(){
   if(document.visibilityState!=='visible')return;
-  var at=parseInt(lsGetRaw(LS_SYNCAT,'0'),10)||0;
-  if(Date.now()-at>180000)_autoSync();
+  _retryAt=0; _retryStep=15000;
+  syncNowIfStale(60000,'all');
+  checkForUpdate(true);
+  setTimeout(maybeAutoUpdate,3000);       // apply a new build at this natural break
+});
+
+/* Last-ditch push when the app is closed or backgrounded: keepalive lets the
+   browser finish these requests after the page is gone. */
+window.addEventListener('pagehide',function(){
+  if(!S.url)return;
+  var q=outbox();
+  for(var i=0;i<q.length&&i<20;i++){
+    try{
+      var op=q[i];
+      var qs=(op.t==='del')?('action=deleteExpense&expId='+encodeURIComponent(op.id)):expQuery(op.exp);
+      fetch(S.url+'?'+qs,{keepalive:true,mode:'no-cors'});
+    }catch(e){}
+  }
 });
 
 
@@ -1056,7 +1240,9 @@ function enterApp(role){
   showOnlyScreen('app-screen');
   populateCatDropdown();populatePMDropdown();populatePartyDL();populateRptFilters();
   renderDashboard();renderSettings();updateSyncChip();
-  setTimeout(function(){cloudSync(true);},600);   // pull the Sheet on every entry
+  setTimeout(function(){cloudSync(true,'all');_lastFullPull=Date.now();_lastLitePull=Date.now();},600);
+  setTimeout(function(){checkForUpdate(true);},2500); // and see if a newer build is live
+  startSyncEngine();                                  // then keep it in sync by itself
   // Ensure the dashboard tab is visible — switchTab sets inline style.display
   // on inner screens which showOnlyScreen doesn't handle (it only toggles .active
   // on top-level .screen elements). Without this, all inner tab screens are hidden.
@@ -1086,7 +1272,7 @@ function switchTab(tab){
   var titles={dashboard:'Expenses',reports:'Reports',credit:'Supplier Credit',settings:'Settings'};
   document.getElementById('topbar-title').textContent=titles[tab]||'';
   document.getElementById('btn-add-exp').style.display=tab==='dashboard'?'':'none';
-  if(tab==='reports')renderReports();
+  if(tab==='reports'){renderReports();syncNowIfStale(45000,recentMonths(3));}
   if(tab==='credit')ptLoadCreditors();
   if(tab==='settings')renderSettings();
 }
@@ -1126,7 +1312,7 @@ function onDashSearch(){
     return [e.party,e.category,e.item,e.desc,e.ref].some(function(f){return (f||'').toLowerCase().indexOf(q)>=0;});
   });
   matches.sort(function(a,b){return (b.date||'').localeCompare(a.date||'');});
-  if(!matches.length){ resEl.innerHTML='<div class="empty"><div class="empty-icon">\U0001F50D</div><div class="empty-text">No matches for “'+q+'”.</div></div>'; resEl.style.display=''; return; }
+  if(!matches.length){ resEl.innerHTML='<div class="empty"><div class="empty-icon">&#128269;</div><div class="empty-text">No matches for “'+q+'”.</div></div>'; resEl.style.display=''; return; }
   var tot=matches.reduce(function(s,e){return s+(e.total||0);},0);
   var bal=matches.reduce(function(s,e){return s+(e.balance||0);},0);
   var html='<div class="section-hdr"><span>'+matches.length+' result'+(matches.length>1?'s':'')+' · '+fmtM(tot)+(bal>0?' (bal '+fmtM(bal)+')':'')+'</span></div>';
@@ -1201,6 +1387,7 @@ function uploadExpenseDoc(input){
 }
 
 function renderDashboard(){
+  renderSyncWarning();
   var exps=getFilteredExp();
   var tot=exps.reduce(function(s,e){return s+(e.total||0);},0);
   var paid=exps.reduce(function(s,e){return s+(e.paid||0);},0);
