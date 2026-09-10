@@ -172,7 +172,7 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
-      <span id="sync-chip" onclick="cloudSync(false)" title="Tap to sync" style="font-size:11px;color:var(--cream);opacity:0.85;font-weight:700;margin-right:8px;cursor:pointer;">&#9729;</span><span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v35</span>
+      <span id="sync-chip" onclick="cloudSync(false)" title="Tap to sync" style="font-size:11px;color:var(--cream);opacity:0.85;font-weight:700;margin-right:8px;cursor:pointer;">&#9729;</span><span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v36</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
@@ -1004,7 +1004,16 @@ function forcePushAll(){
 function updateSyncChip(state){
   var el=document.getElementById('sync-chip');
   if(!el)return;
-  if(state==='syncing'){el.textContent='☁ syncing…';el.style.color='#FFD54F';return;}
+  /* v36: "syncing…" with no number looks stuck when there is a backlog.
+     flushOutbox sends ONE record per request on purpose (parallel uploads made
+     Apps Script drop rows), so 485 queued records is genuinely 485 round trips
+     — eight to fifteen minutes of honest work. Show the count so it reads as
+     progress rather than a hang. */
+  if(state==='syncing'){
+    var _p=pendingCount();
+    el.textContent='☁ syncing'+(_p?(' \u00b7 '+_p+' left'):'\u2026');
+    el.style.color='#FFD54F'; return;
+  }
   var p=pendingCount();
   el.textContent='☁ '+S.expenses.length+(p?' · ⏳'+p:'');
   el.style.color=p?'#FFB300':'var(--cream)';
@@ -2930,17 +2939,37 @@ function matchAndShowResults(txns) {
 
     // TIER 3: Probable match — same amount on same date but no party match
     // (different station name in desc vs driver name in app)
-    var probableMatch = S.expenses.find(function(e) {
+    /* v36: this required dayDiff === 0. A card almost always POSTS a day or
+       two after the purchase, so an expense you entered on the 19th could
+       never match a statement line dated the 20th. It fell through to
+       "missing", you added it, and the same spend ended up in the book twice
+       on two different dates. That is the date mismatch you were seeing —
+       your own explanation was right.
+       Now ±3 days, closest first, so the true purchase date wins. */
+    var _cands = S.expenses.filter(function(e) {
       var sameAmt = Math.abs((e.total||0) - txn.amount) < 2;
       var dayDiff = Math.abs(new Date(e.date) - new Date(txn.date)) / 86400000;
-      return sameAmt && dayDiff === 0; // exact same date, same amount
+      return sameAmt && dayDiff <= 3;
+    }).sort(function(a,b){
+      return Math.abs(new Date(a.date)-new Date(txn.date))
+           - Math.abs(new Date(b.date)-new Date(txn.date));
     });
+    var probableMatch = _cands[0];
+    if(probableMatch){
+      txn._dayGap = Math.round(Math.abs(new Date(probableMatch.date) - new Date(txn.date))/86400000);
+    }
     if(probableMatch) {
       txn.matchType = 'probable';
       txn.matchedExp = probableMatch;
-      txn.autoCat   = autoInfo.cat || probableMatch.category;
-      txn.autoParty = autoInfo.party;
-      txn.autoItem  = autoInfo.item || probableMatch.item;
+      txn.autoCat   = probableMatch.category || autoInfo.cat;
+      /* v36: was autoInfo.party — the name off the statement ("BHONGLE
+         PETROL"). When the app already holds this spend as "Shubham Carry",
+         that is the name that belongs in the Sheet, because it is how you
+         categorise by person and vehicle. The statement's wording is kept in
+         the description for the audit trail. */
+      txn.autoParty = probableMatch.party || autoInfo.party;
+      txn.autoItem  = probableMatch.item || autoInfo.item;
+      txn._appDate  = probableMatch.date;
       probableMatched.push(txn);
       return;
     }
@@ -3047,6 +3076,7 @@ function matchAndShowResults(txns) {
         + (dayDiff > 0 ? dayDiff+' day'+(dayDiff>1?'s':'')+' apart · ' : 'same date · ')
         + '<b>'+txn.matchedExp.party+'</b> · ₹'+fmtM(txn.matchedExp.total)+' · '+txn.matchedExp.category
         + '<br><span style="color:var(--muted);">Different name in app (driver) vs statement (station)</span>'
+        + (txn._dayGap ? ('<br><span style="color:var(--amber);">\u26A0 statement is '+txn._dayGap+' day(s) later than your entry \u2014 normal for a card. Keeping your date.</span>') : '')
         + '</div>';
     } else if(txn.autoCat) {
       badge = '<span style="background:var(--gl);color:var(--green);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700;margin-left:6px;">'+txn.autoCat+'</span>';
@@ -3099,7 +3129,10 @@ function openImportItemAt(idx) {
   document.getElementById('import-party').value = txn.autoParty || '';
   document.getElementById('import-item-name').value = txn.autoItem || '';
   document.getElementById('import-amount').value = txn.amount;
-  document.getElementById('import-date').value = txn.date;
+  /* v36: when this line was matched to an expense you already entered, show
+     YOUR date — the day the spend actually happened — not the day the card
+     posted it. Saving then keeps the book on the real date. */
+  document.getElementById('import-date').value = txn._appDate || txn.date;
 
   // Populate category
   var cats = S.cats.map(function(c){ return '<option value="'+c+'">'+c+'</option>'; }).join('');
