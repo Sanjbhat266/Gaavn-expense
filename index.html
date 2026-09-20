@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta name="app-version" content="35">
+<meta name="app-version" content="37">
 <title>Gaavn Fresh - Expense Tracker</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -172,7 +172,7 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
-      <span id="sync-chip" onclick="cloudSync(false)" title="Tap to sync" style="font-size:11px;color:var(--cream);opacity:0.85;font-weight:700;margin-right:8px;cursor:pointer;">&#9729;</span><span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v36</span>
+      <span id="sync-chip" onclick="cloudSync(false)" title="Tap to sync" style="font-size:11px;color:var(--cream);opacity:0.85;font-weight:700;margin-right:8px;cursor:pointer;">&#9729;</span><span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v37</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
@@ -819,6 +819,13 @@ async function sheetFetch(qs,timeoutMs){
     return jparse(txt,{error:'bad response'});
   } finally { clearTimeout(timer); }
 }
+var _syncErr='', _lastPushErr='';
+function _whyBad(r){
+  if(!r)return 'no reply from the Sheet';
+  if(r.error==='bad response')return 'the Sheet sent back a web page instead of data (script URL or deployment problem)';
+  if(r.error)return 'the Sheet said: '+r.error;
+  return 'unexpected reply from the Sheet';
+}
 async function pushOne(op){
   if(op.t==='del'){
     var r=await sheetFetch('action=deleteExpense&expId='+encodeURIComponent(op.id),20000);
@@ -826,29 +833,70 @@ async function pushOne(op){
     return (r&&(r.status==='deleted'||r.status==='notfound'))?'ok':'fail';
   }
   var r2=await sheetFetch(expQuery(op.exp),20000);
-  return (r2&&(r2.status==='ok'||r2.status==='updated'))?'ok':'fail';
+  if(r2&&(r2.status==='ok'||r2.status==='updated'))return 'ok';
+  _lastPushErr=_whyBad(r2);
+  return 'fail';
 }
 
-/* Sends the queue one request at a time. v32 fired the whole import in
-   parallel; Apps Script serialises on a lock and simply dropped the rest. */
+/* ══════════════════════════════════════════════════════════════════════
+   v37 — THE UPLOAD QUEUE NO LONGER GETS STUCK
+   v36 sent the whole queue in one pass and only wrote down what was left
+   when the pass FINISHED. At ~3 s a record, 1,036 records is ~55 minutes;
+   a phone pauses the page the moment the screen locks or you switch apps,
+   so the pass never finished, nothing was ever crossed off, and the next
+   pass started again from record 1. New expenses were added to the END of
+   that queue, so nothing entered after 11 Sep ever reached the Sheet.
+   Now:
+     · each record is crossed off the moment the Sheet confirms it
+     · deletes go first, then the NEWEST expenses first
+     · after 3 failures in a row it stops and says why, instead of
+       grinding on silently
+   ══════════════════════════════════════════════════════════════════════ */
+function _outboxOrder(q){
+  return q.slice().sort(function(a,b){
+    if(a.t==='del'&&b.t!=='del')return -1;
+    if(b.t==='del'&&a.t!=='del')return 1;
+    var da=String((a.exp&&a.exp.date)||''), db=String((b.exp&&b.exp.date)||'');
+    return da<db?1:(da>db?-1:0);
+  });
+}
+function _opKey(o){ return o.t+'|'+o.id+'|'+JSON.stringify(o.exp||null); }
+/* Cross off exactly this op. If the record was edited while its upload was
+   in flight, the queue now holds a NEWER version — that one is kept. */
+function _outboxDrop(op){
+  var a=outbox(), k=_opKey(op);
+  for(var i=0;i<a.length;i++){ if(_opKey(a[i])===k){ a.splice(i,1); lsSet(LS_OUTBOX,JSON.stringify(a)); return; } }
+}
 async function flushOutbox(silent){
   if(_flushing||!S.url)return 0;
-  var q=outbox();
-  if(!q.length){updateSyncChip();return 0;}
+  if(!outbox().length){updateSyncChip();return 0;}
   _flushing=true;
-  var sent=0, left=[], oldScript=false;
-  for(var i=0;i<q.length;i++){
-    var r='fail';
-    try{ r=await pushOne(q[i]); }catch(e){ r='fail'; }
-    if(r==='ok')sent++;
-    else if(r==='unsupported')oldScript=true;               // drop it, tombstone still protects us
-    else left.push(q[i]);
-    if(!silent&&i%10===9)showToast('Uploading… '+(i+1)+'/'+q.length);
-  }
-  _flushing=false;
-  outboxSave(left);
+  var sent=0, fails=0, oldScript=false, tried={};
+  try{
+    while(true){
+      var q=_outboxOrder(outbox()).filter(function(o){return !tried[_opKey(o)];});
+      if(!q.length)break;
+      var op=q[0]; tried[_opKey(op)]=1;
+      var r='fail'; _lastPushErr='';
+      try{ r=await pushOne(op); }
+      catch(e){ r='fail'; _lastPushErr=(e&&e.name==='AbortError')?'the Sheet did not answer in time':'no internet connection'; }
+      if(r==='ok'||r==='unsupported'){
+        _outboxDrop(op);
+        if(r==='ok')sent++; else oldScript=true;
+        fails=0; _syncErr='';
+      } else {
+        fails++; _syncErr=_lastPushErr||'the Sheet did not accept the record';
+        if(fails>=3)break;
+      }
+      updateSyncChip(_syncing?'syncing':undefined);
+      if(!silent&&sent&&sent%10===0)showToast('Uploading… '+sent+' sent, '+pendingCount()+' left');
+    }
+  } finally { _flushing=false; }
+  updateSyncChip(_syncing?'syncing':undefined);
+  try{renderSyncWarning();}catch(e){}
   if(oldScript&&!silent)showToast('Deletes need the updated Apps Script (Settings → View Script)');
   if(sent&&!silent)showToast('☁ '+sent+' record(s) pushed to Sheet');
+  if(fails>=3&&!silent)showToast('Upload paused — '+_syncErr);
   return sent;
 }
 
@@ -859,15 +907,25 @@ function recentMonths(n){
   for(var i=0;i<n;i++)out.push(monthKey(new Date(now.getFullYear(),now.getMonth()-i,1)));
   return out;
 }
+/* v37: a month that could not be read is reported, not treated as empty.
+   v36 read a failed month as "the Sheet has nothing for this month" and
+   queued every expense in it for upload — on a patchy mobile signal that is
+   how all 1,036 records ended up in the queue. */
 async function fetchMonths(months){
-  var rows=[];
+  var rows=[], failed=[], why='';
   for(var c=0;c<months.length;c+=4){
-    var res=await Promise.all(months.slice(c,c+4).map(function(m){
-      return sheetFetch('action=getExpenses&month='+m,30000).catch(function(){return null;});
+    var chunk=months.slice(c,c+4);
+    var res=await Promise.all(chunk.map(function(m){
+      return sheetFetch('action=getExpenses&month='+m,30000).catch(function(e){
+        return {error:(e&&e.name==='AbortError')?'timeout':'network'};
+      });
     }));
-    res.forEach(function(r){ if(r&&r.expenses&&r.expenses.length)rows=rows.concat(r.expenses); });
+    res.forEach(function(r,i){
+      if(r&&Array.isArray(r.expenses)){ rows=rows.concat(r.expenses); }
+      else { failed.push(chunk[i]); why=why||(r&&r.error==='timeout'?'the Sheet did not answer in time':r&&r.error==='network'?'no internet connection':_whyBad(r)); }
+    });
   }
-  return rows;
+  return {rows:rows, failed:failed, why:why};
 }
 
 /* scope: 'all' (default) or an array of 'YYYY-MM'. The light scope is what
@@ -876,25 +934,31 @@ async function cloudPull(scope){
   if(!S.url)throw new Error('No Sheet URL');
   var rows=null, oldestMonth=null, monthSet=null;
 
+  var failedSet={}, asked=0, fm;
   if(scope&&scope!=='all'){
     monthSet={}; scope.forEach(function(m){monthSet[m]=1;});
-    rows=await fetchMonths(scope);
+    fm=await fetchMonths(scope); rows=fm.rows; asked=scope.length;
   } else {
     try{
       var all=await sheetFetch('action=getAllExpenses',60000);
-      if(all&&all.expenses&&!all.error)rows=all.expenses;
+      if(all&&Array.isArray(all.expenses)&&!all.error)rows=all.expenses;
     }catch(e){}
     if(!rows){
       var months=recentMonths(24);
       oldestMonth=months[months.length-1]+'-01';
-      rows=await fetchMonths(months);
+      fm=await fetchMonths(months); rows=fm.rows; asked=months.length;
     }
+  }
+  if(fm){
+    fm.failed.forEach(function(m){failedSet[m]=1;});
+    // Nothing could be read at all: say so. Never conclude the Sheet is empty.
+    if(fm.failed.length&&fm.failed.length===asked)throw new Error('Could not read the Sheet — '+fm.why);
   }
 
   var tset={}; tombs().forEach(function(id){tset[id]=1;});
   var pend={}; outbox().forEach(function(o){pend[o.id]=1;});
   var byId={}; S.expenses.forEach(function(e){byId[e.id]=e;});
-  var sheetIds={}, added=0, fixed=0;
+  var sheetIds={}, sheetRec={}, added=0, fixed=0;
 
   rows.forEach(function(row){
     var id=String(row['ID']!=null?row['ID']:(row[0]||'')).trim();
@@ -921,6 +985,7 @@ async function cloudPull(scope){
       desc:String(row['Description']||row[16]||''),
       role:row['Role']||row[17]||''
     };
+    sheetRec[id]=rec;
     var ex=byId[id];
     if(!ex){ S.expenses.push(rec); byId[id]=rec; added++; return; }
     if(pend[id])return;                                    // local edit not uploaded yet — keep ours
@@ -939,10 +1004,23 @@ async function cloudPull(scope){
   var missing=S.expenses.filter(function(e){
     if(sheetIds[e.id])return false;
     if(monthSet&&!monthSet[String(e.date||'').slice(0,7)])return false;  // month we didn't fetch
+    if(failedSet[String(e.date||'').slice(0,7)])return false;             // v37: month we could NOT read
     if(oldestMonth&&e.date&&e.date<oldestMonth)return false;             // outside the window we fetched
     return true;
   });
   outboxAddMany(missing.map(function(e){return {t:'up',id:e.id,exp:e};}));
+
+  /* v37: cross off queued uploads the Sheet ALREADY holds, exactly as queued.
+     This is what brings a queue of 1,036 down to the handful that are
+     genuinely missing. A queued record that differs from the Sheet (an edit
+     not yet uploaded) stays queued. */
+  var pruned=0, ob=outbox(), keep=ob.filter(function(o){
+    if(o.t!=='up'||!o.exp)return true;
+    var sr=sheetRec[o.id]; if(!sr)return true;
+    if(_sameAsSheet(o.exp,sr)){pruned++;return false;}
+    return true;
+  });
+  if(pruned)outboxSave(keep);
 
   /* backfill parties + categories discovered in the Sheet */
   var pchg=false, cchg=false;
@@ -960,8 +1038,22 @@ async function cloudPull(scope){
 
   S.expenses.sort(function(a,b){return String(b.date||'').localeCompare(String(a.date||''));});
   saveExpenses();
-  _lastPull={added:added,fixed:fixed,sheetRows:Object.keys(sheetIds).length,queued:missing.length,at:Date.now()};
+  _lastPull={added:added,fixed:fixed,sheetRows:Object.keys(sheetIds).length,queued:missing.length,pruned:pruned,
+             unread:Object.keys(failedSet),at:Date.now()};
   return _lastPull;
+}
+
+/* v37: is this queued record already in the Sheet, as queued? */
+function _sameAsSheet(e,sr){
+  var t=function(v){return String(v==null?'':v).trim();};
+  var pm=S.pm.find(function(p){return p.id===e.payMethodId;});
+  var pmS=S.pm.find(function(p){return p.id===sr.payMethodId;});
+  return t(e.date)===t(sr.date)
+    && normAmt(e.total)===sr.total && normAmt(e.paid)===sr.paid && normAmt(e.balance)===sr.balance
+    && t(e.party)===t(sr.party) && t(e.category)===t(sr.category) && t(e.item)===t(sr.item)
+    && t(e.ref)===t(sr.ref) && t(e.desc)===t(sr.desc) && t(e.driveLink)===t(sr.driveLink)
+    && t(e.gstMode||'none')===t(sr.gstMode||'none') && normAmt(e.gstAmount)===sr.gstAmount
+    && t(pm?pm.name:'')===t(pmS?pmS.name:'');
 }
 
 /* ── one button that makes both devices agree ──────────────────────── */
@@ -969,10 +1061,14 @@ async function cloudSync(silent,scope){
   if(!S.url){ if(!silent)showToast('Set the Sheet URL in Settings first'); return; }
   if(_syncing)return;
   _syncing=true; updateSyncChip('syncing');
+  var pullErr=null, r=null;
   try{
-    await flushOutbox(true);              // 1. send what we owe
-    var r=await cloudPull(scope||'all');  // 2. take what the Sheet has
-    await flushOutbox(true);              // 3. send what the pull found missing
+    /* v37: read the Sheet FIRST. That crosses off everything it already has,
+       so the upload below sends only what is genuinely missing — v36 sent the
+       whole backlog before ever looking. If the read fails, uploads still run. */
+    try{ r=await cloudPull(scope||'all'); }catch(pe){ pullErr=pe; }
+    await flushOutbox(true);
+    if(pullErr)throw pullErr;
     lsSet(LS_SYNCAT,String(Date.now()));
     // Repaint only when the data actually moved, so a silent background sync
     // never yanks the screen while someone is reading it.
@@ -988,7 +1084,9 @@ async function cloudSync(silent,scope){
     else if(r.added)showToast('\u2601 '+r.added+' new record(s) from another device');
   }catch(e){
     console.error('[sync]',e);
-    if(!silent)showToast('Sync failed \u2014 check internet or Sheet URL');
+    _syncErr=(e&&e.message)||'sync failed';
+    try{renderSyncWarning();}catch(x){}
+    if(!silent)showToast('Sync failed \u2014 '+_syncErr);
   }
   _syncing=false; updateSyncChip();
 }
@@ -997,7 +1095,11 @@ function forcePushAll(){
   if(!S.url){showToast('Set the Sheet URL in Settings first');return;}
   if(!confirm('Upload all '+S.expenses.length+' records from THIS device to the Google Sheet?\n\nRows with the same ID are updated, never duplicated.'))return;
   outboxAddMany(S.expenses.map(function(e){return {t:'up',id:e.id,exp:e};}));
-  showToast('Queued '+S.expenses.length+' records…');
+  showToast('Checking '+S.expenses.length+' records against the Sheet…');
+  /* v37: compare with the Sheet first, so only missing or changed records are
+     sent — v36 re-sent every record, ~3 s each. */
+  cloudSync(false,'all').then(function(){updateSyncChip();if(typeof renderSettings==='function')renderSettings();});
+  return;
   flushOutbox(false).then(function(){updateSyncChip();if(typeof renderSettings==='function')renderSettings();});
 }
 
@@ -1042,7 +1144,7 @@ function syncStatusHTML(){
    incognito had v33). The app now asks the server what the current version
    is and offers a one-tap, cache-busting reload.
    ══════════════════════════════════════════════════════════════════════ */
-var APP_VERSION=35, _remoteVersion=null;
+var APP_VERSION=37, _remoteVersion=null;
 
 async function checkForUpdate(silent){
   try{
@@ -1095,6 +1197,7 @@ function renderSyncWarning(){
   if(!pend&&!stale){el.classList.remove('show');return;}
   el.innerHTML=pend
     ? '\u23f3 <b>'+pend+' record(s) on this device have not reached the Google Sheet.</b> Totals here will not match your other devices until they do. Tap to sync now.'
+      + (_syncErr?('<br><span style="font-size:11px;">Last attempt: '+_syncErr+'</span>'):'')
     : '\u2601 <b>This device has not synced'+(at?(' since '+new Date(at).toLocaleDateString('en-IN')):' yet')+'.</b> Its totals may be out of date. Tap to sync now.';
   el.classList.add('show');
 }
@@ -1129,6 +1232,14 @@ async function syncHeartbeat(){
     if(now<_retryAt)return;
     _retryAt=now+_retryStep;
     _retryStep=Math.min(_retryStep*2,180000);
+    /* v37: a big backlog is first checked against the Sheet, which crosses off
+       everything already there — then only the rest is uploaded. */
+    if(pendingCount()>25&&now-_lastFullPull>LITE_EVERY){
+      _lastFullPull=now; _lastLitePull=now;
+      await cloudSync(true,'all');
+      if(!pendingCount()){ _retryStep=15000; _retryAt=0; }
+      return;
+    }
     var sent=await flushOutbox(true);
     if(!pendingCount()){ _retryStep=15000; _retryAt=0; renderSyncWarning(); if(sent)updateSyncChip(); }
     return;
@@ -1180,7 +1291,7 @@ document.addEventListener('visibilitychange',function(){
    browser finish these requests after the page is gone. */
 window.addEventListener('pagehide',function(){
   if(!S.url)return;
-  var q=outbox();
+  var q=_outboxOrder(outbox());          // v37: newest first
   for(var i=0;i<q.length&&i<20;i++){
     try{
       var op=q[i];
