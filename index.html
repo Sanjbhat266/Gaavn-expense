@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta name="app-version" content="37">
+<meta name="app-version" content="38">
 <title>Gaavn Fresh - Expense Tracker</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -172,7 +172,7 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
-      <span id="sync-chip" onclick="cloudSync(false)" title="Tap to sync" style="font-size:11px;color:var(--cream);opacity:0.85;font-weight:700;margin-right:8px;cursor:pointer;">&#9729;</span><span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v37</span>
+      <span id="sync-chip" onclick="cloudSync(false)" title="Tap to sync" style="font-size:11px;color:var(--cream);opacity:0.85;font-weight:700;margin-right:8px;cursor:pointer;">&#9729;</span><span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v38</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
@@ -820,6 +820,21 @@ async function sheetFetch(qs,timeoutMs){
   } finally { clearTimeout(timer); }
 }
 var _syncErr='', _lastPushErr='';
+/* v38: true while the deployed Sheet script cannot delete (the pre-v38
+   script answers "unknown"). Deletes then WAIT in the queue — they are no
+   longer thrown away — and go through the moment the script is updated. */
+var _delHold=false;
+function _heldDels(){ return _delHold ? outbox().filter(function(o){return o.t==='del';}).length : 0; }
+function activeCount(){ return pendingCount()-_heldDels(); }
+/* v38: an expense deleted on any device is removed here too. */
+function _applyRemoteDelete(id){
+  var had=S.expenses.some(function(e){return e.id===id;});
+  if(had){ S.expenses=S.expenses.filter(function(e){return e.id!==id;}); }
+  tombAdd(id);
+  var q=outbox(), q2=q.filter(function(o){return !(o.t==='up'&&o.id===id);});
+  if(q2.length!==q.length) lsSet(LS_OUTBOX,JSON.stringify(q2));
+  return had;
+}
 function _whyBad(r){
   if(!r)return 'no reply from the Sheet';
   if(r.error==='bad response')return 'the Sheet sent back a web page instead of data (script URL or deployment problem)';
@@ -828,12 +843,14 @@ function _whyBad(r){
 }
 async function pushOne(op){
   if(op.t==='del'){
-    var r=await sheetFetch('action=deleteExpense&expId='+encodeURIComponent(op.id),20000);
-    if(r&&r.error==='unknown')return 'unsupported';        // old Apps Script deployed
-    return (r&&(r.status==='deleted'||r.status==='notfound'))?'ok':'fail';
+    var r=await sheetFetch('action=deleteExpense&expId='+encodeURIComponent(op.id)+'&role='+encodeURIComponent(S.role||''),20000);
+    if(r&&r.error==='unknown'){ _delHold=true; return 'unsupported'; }   // old Apps Script deployed
+    if(r&&(r.status==='deleted'||r.status==='notfound')){ _delHold=false; return 'ok'; }
+    _lastPushErr=_whyBad(r); return 'fail';
   }
   var r2=await sheetFetch(expQuery(op.exp),20000);
   if(r2&&(r2.status==='ok'||r2.status==='updated'))return 'ok';
+  if(r2&&r2.status==='deleted'){ _applyRemoteDelete(op.id); saveExpenses(); return 'ok'; }   // v38: deleted elsewhere
   _lastPushErr=_whyBad(r2);
   return 'fail';
 }
@@ -874,16 +891,16 @@ async function flushOutbox(silent){
   var sent=0, fails=0, oldScript=false, tried={};
   try{
     while(true){
-      var q=_outboxOrder(outbox()).filter(function(o){return !tried[_opKey(o)];});
+      var q=_outboxOrder(outbox()).filter(function(o){return !tried[_opKey(o)] && !(_delHold&&o.t==='del');});
       if(!q.length)break;
       var op=q[0]; tried[_opKey(op)]=1;
       var r='fail'; _lastPushErr='';
       try{ r=await pushOne(op); }
       catch(e){ r='fail'; _lastPushErr=(e&&e.name==='AbortError')?'the Sheet did not answer in time':'no internet connection'; }
-      if(r==='ok'||r==='unsupported'){
-        _outboxDrop(op);
-        if(r==='ok')sent++; else oldScript=true;
-        fails=0; _syncErr='';
+      if(r==='ok'){
+        _outboxDrop(op); sent++; fails=0; _syncErr='';
+      } else if(r==='unsupported'){
+        oldScript=true; fails=0;            // v38: kept in the queue, waits for the new script
       } else {
         fails++; _syncErr=_lastPushErr||'the Sheet did not accept the record';
         if(fails>=3)break;
@@ -894,7 +911,7 @@ async function flushOutbox(silent){
   } finally { _flushing=false; }
   updateSyncChip(_syncing?'syncing':undefined);
   try{renderSyncWarning();}catch(e){}
-  if(oldScript&&!silent)showToast('Deletes need the updated Apps Script (Settings → View Script)');
+  if(oldScript&&!silent)showToast('Deleted on this device — it will be removed from the Sheet once the Sheet script is updated (Settings → View Script)');
   if(sent&&!silent)showToast('☁ '+sent+' record(s) pushed to Sheet');
   if(fails>=3&&!silent)showToast('Upload paused — '+_syncErr);
   return sent;
@@ -955,16 +972,27 @@ async function cloudPull(scope){
     if(fm.failed.length&&fm.failed.length===asked)throw new Error('Could not read the Sheet — '+fm.why);
   }
 
+  /* v38: expenses deleted on ANY device. The pre-v38 script cannot answer —
+     then deletes are held (see _delHold) and nothing else changes. */
+  var remoteDel=0;
+  try{
+    var dr=await sheetFetch('action=getDeleted',20000);
+    if(dr&&Array.isArray(dr.ids)){
+      _delHold=false;
+      dr.ids.forEach(function(id){ if(_applyRemoteDelete(String(id)))remoteDel++; });
+    } else if(dr&&dr.error==='unknown'){ _delHold=true; }
+  }catch(e){}
+
   var tset={}; tombs().forEach(function(id){tset[id]=1;});
   var pend={}; outbox().forEach(function(o){pend[o.id]=1;});
   var byId={}; S.expenses.forEach(function(e){byId[e.id]=e;});
-  var sheetIds={}, sheetRec={}, added=0, fixed=0;
+  var sheetIds={}, sheetRec={}, added=0, fixed=0, delAgain=[];
 
   rows.forEach(function(row){
     var id=String(row['ID']!=null?row['ID']:(row[0]||'')).trim();
     if(!id)return;
     sheetIds[id]=1;
-    if(tset[id])return;                                    // deleted on this device
+    if(tset[id]){ delAgain.push(id); return; }             // deleted on this device — still in the Sheet
     var rec={
       id:id,
       date:normDate(row['Date']!=null?row['Date']:row[1]),
@@ -1009,6 +1037,10 @@ async function cloudPull(scope){
     return true;
   });
   outboxAddMany(missing.map(function(e){return {t:'up',id:e.id,exp:e};}));
+  /* v38: this device deleted it, but the Sheet still has it (deleted while the
+     old script was live, or the delete never got through): send it again. */
+  var qd={}; outbox().forEach(function(o){ if(o.t==='del')qd[o.id]=1; });
+  outboxAddMany(delAgain.filter(function(id){return !qd[id];}).map(function(id){return {t:'del',id:id};}));
 
   /* v37: cross off queued uploads the Sheet ALREADY holds, exactly as queued.
      This is what brings a queue of 1,036 down to the handful that are
@@ -1038,7 +1070,7 @@ async function cloudPull(scope){
 
   S.expenses.sort(function(a,b){return String(b.date||'').localeCompare(String(a.date||''));});
   saveExpenses();
-  _lastPull={added:added,fixed:fixed,sheetRows:Object.keys(sheetIds).length,queued:missing.length,pruned:pruned,
+  _lastPull={added:added,fixed:fixed,sheetRows:Object.keys(sheetIds).length,queued:missing.length,pruned:pruned,remoteDel:remoteDel,
              unread:Object.keys(failedSet),at:Date.now()};
   return _lastPull;
 }
@@ -1072,7 +1104,7 @@ async function cloudSync(silent,scope){
     lsSet(LS_SYNCAT,String(Date.now()));
     // Repaint only when the data actually moved, so a silent background sync
     // never yanks the screen while someone is reading it.
-    var changed=(r.added||r.fixed||r.queued);
+    var changed=(r.added||r.fixed||r.queued||r.remoteDel);
     if(changed||!silent){
       if(typeof renderDashboard==='function'&&!modalOpen())renderDashboard();
       var rs=document.getElementById('screen-reports');
@@ -1144,7 +1176,7 @@ function syncStatusHTML(){
    incognito had v33). The app now asks the server what the current version
    is and offers a one-tap, cache-busting reload.
    ══════════════════════════════════════════════════════════════════════ */
-var APP_VERSION=37, _remoteVersion=null;
+var APP_VERSION=38, _remoteVersion=null;
 
 async function checkForUpdate(silent){
   try{
@@ -1195,6 +1227,11 @@ function renderSyncWarning(){
   var at=parseInt(lsGetRaw(LS_SYNCAT,'0'),10)||0;
   var stale=!at||(Date.now()-at>86400000);
   if(!pend&&!stale){el.classList.remove('show');return;}
+  var held=_heldDels();
+  if(held&&held===pend){
+    el.innerHTML='\ud83d\uddd1 <b>'+held+' deleted expense(s) are still in the Google Sheet.</b> The Sheet script must be updated before deletes can reach it (Settings \u2192 View Script). They are removed automatically once it is.';
+    el.classList.add('show'); return;
+  }
   el.innerHTML=pend
     ? '\u23f3 <b>'+pend+' record(s) on this device have not reached the Google Sheet.</b> Totals here will not match your other devices until they do. Tap to sync now.'
       + (_syncErr?('<br><span style="font-size:11px;">Last attempt: '+_syncErr+'</span>'):'')
@@ -1228,20 +1265,20 @@ async function syncHeartbeat(){
   var now=Date.now();
 
   // 1. unsent rows: retry with backoff until the Sheet accepts them
-  if(pendingCount()){
+  if(activeCount()){
     if(now<_retryAt)return;
     _retryAt=now+_retryStep;
     _retryStep=Math.min(_retryStep*2,180000);
     /* v37: a big backlog is first checked against the Sheet, which crosses off
        everything already there — then only the rest is uploaded. */
-    if(pendingCount()>25&&now-_lastFullPull>LITE_EVERY){
+    if(activeCount()>25&&now-_lastFullPull>LITE_EVERY){
       _lastFullPull=now; _lastLitePull=now;
       await cloudSync(true,'all');
-      if(!pendingCount()){ _retryStep=15000; _retryAt=0; }
+      if(!activeCount()){ _retryStep=15000; _retryAt=0; }
       return;
     }
     var sent=await flushOutbox(true);
-    if(!pendingCount()){ _retryStep=15000; _retryAt=0; renderSyncWarning(); if(sent)updateSyncChip(); }
+    if(!activeCount()){ _retryStep=15000; _retryAt=0; renderSyncWarning(); if(sent)updateSyncChip(); }
     return;
   }
   _retryStep=15000;
@@ -1714,7 +1751,7 @@ function deleteExpense(id){
   if(S.url)flushOutbox(true);
   closeModal('modal-view-exp');
   renderDashboard();
-  showToast('Deleted');
+  showToast(_delHold?'Deleted here — waiting for the updated Sheet script to delete it there':'Deleted');
 }
 
 function viewExpense(id){
@@ -2497,24 +2534,8 @@ function copyScript(){
   document.execCommand('copy');showToast('Copied!');
 }
 function getAppsScript(){
-  return [
-    '// GAAVN FRESH Expense Tracker - Google Apps Script',
-    '// Deploy: Execute as Me | Access: Anyone',
-    'var SS_ID=SpreadsheetApp.getActiveSpreadsheet().getId();',
-    'function doGet(e){try{var a=e.parameter.action||"";if(a=="ping")return j({pong:true});if(a=="logExpense")return logExp(e.parameter);if(a=="getExpenses")return getExps(e.parameter);if(a=="getAllExpenses")return getAll();if(a=="deleteExpense")return delExp(e.parameter);return j({error:"unknown"});}catch(err){return j({error:err.message});}}',
-    'function j(o){return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);}',
-    'function getSheet(date){var ss=SpreadsheetApp.openById(SS_ID);var m=(date||"").slice(0,7)||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"yyyy-MM");var name="Expenses_"+m;var sh=ss.getSheetByName(name)||ss.insertSheet(name);if(sh.getLastRow()===0){var h=["ID","Date","Party","Category","Item","State","Total","Paid","Balance","GST Mode","GST Rate","GST Amt","Base Amt","Payment","Ref","Drive Link","Description","Role","Synced"];sh.appendRow(h);sh.getRange(1,1,1,h.length).setFontWeight("bold").setBackground("#1A3A1F").setFontColor("#fff");sh.setFrozenRows(1);}return sh;}',
-    'function logExp(p){var lock=LockService.getScriptLock();try{lock.waitLock(30000);}catch(e){return j({error:"busy, try again"});}try{var sh=getSheet(p.date);var now=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"dd/MM/yyyy HH:mm");var row=[p.expId,p.date,p.party,p.category,p.item||"",p.state||"",+p.total||0,+p.paid||0,+p.balance||0,p.gstMode||"none",p.gstRate||"",+p.gstAmt||0,+p.baseAmt||0,p.payMethod||"",p.ref||"",p.driveLink||"",p.desc||"",p.role||"",now];var data=sh.getDataRange().getValues();for(var r=1;r<data.length;r++){if(String(data[r][0])===String(p.expId)){sh.getRange(r+1,1,1,row.length).setValues([row]);sh.getRange(r+1,1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"updated"});}}sh.appendRow(row);sh.getRange(sh.getLastRow(),1,1,row.length).setBackground(+p.balance>0?"#FFEBEE":"#E8F5E9");return j({status:"ok"});}finally{lock.releaseLock();}}',
-    '// Dates are returned as plain yyyy-MM-dd. Returning raw Date cells made them',
-    '// UTC ISO strings, which shifted every expense back one day in IST.',
-    'function fmtd(v){if(Object.prototype.toString.call(v)==="[object Date]")return Utilities.formatDate(v,Session.getScriptTimeZone(),"yyyy-MM-dd");return String(v||"").slice(0,10);}',
-    'function rowsOf(sh){var data=sh.getDataRange().getValues();if(data.length<2)return [];var headers=data[0];return data.slice(1).map(function(r){var o={};headers.forEach(function(h,i){o[h]=(h=="Date")?fmtd(r[i]):r[i];});return o;}).filter(function(o){return o.ID!==""&&o.ID!=null;});}',
-    'function getExps(p){var ss=SpreadsheetApp.openById(SS_ID);var month=p.month||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),"yyyy-MM");var sh=ss.getSheetByName("Expenses_"+month);if(!sh)return j({expenses:[],month:month});var rows=rowsOf(sh);return j({expenses:rows,month:month,count:rows.length});}',
-    'function getAll(){var ss=SpreadsheetApp.openById(SS_ID);var out=[];ss.getSheets().forEach(function(sh){if(sh.getName().indexOf("Expenses_")!==0)return;out=out.concat(rowsOf(sh));});return j({expenses:out,count:out.length});}',
-    'function delExp(p){var lock=LockService.getScriptLock();try{lock.waitLock(30000);}catch(e){return j({error:"busy"});}try{var ss=SpreadsheetApp.openById(SS_ID);var id=String(p.expId||"");var found=false;ss.getSheets().forEach(function(sh){if(found||sh.getName().indexOf("Expenses_")!==0)return;var data=sh.getDataRange().getValues();for(var r=data.length-1;r>=1;r--){if(String(data[r][0])===id){sh.deleteRow(r+1);found=true;break;}}});return j({status:found?"deleted":"notfound"});}finally{lock.releaseLock();}}',
-    'function doPost(e){try{var p=JSON.parse(e.postData.contents);if((p.action||"")=="uploadDoc")return uploadDoc(p);return j({error:"unknown"});}catch(err){return j({error:err.message});}}',
-    'function uploadDoc(p){var fs=DriveApp.getFoldersByName("Gaavn Expense Docs");var folder=fs.hasNext()?fs.next():DriveApp.createFolder("Gaavn Expense Docs");var bytes=Utilities.base64Decode(p.data);var blob=Utilities.newBlob(bytes,p.mimeType||"application/octet-stream",((p.expId||"doc")+"_"+(p.filename||"file")));var file=folder.createFile(blob);file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW);return j({url:file.getUrl(),id:file.getId()});}',
-  ].join('\n');
+  // v38: deletes reach the Sheet and every device (see the header of the script)
+  return ["// GAAVN FRESH Expense Tracker - Google Apps Script  (v38)", "// Deploy: Execute as Me | Access: Anyone.", "// To update: paste over Code.gs, Save, then Deploy > Manage deployments > edit (pencil)", "// > Version: New version > Deploy. The /exec URL stays the same.", "//", "// v38: a deleted expense is deleted everywhere.", "//  - deleteExpense removes EVERY row with that ID, in every Expenses_ tab, and", "//    records the ID in the Deleted_Expenses tab.", "//  - every device reads that list (getDeleted) and drops the expense too, so a", "//    phone or laptop that still had it can never upload it again.", "//  - logExpense refuses an ID that has been deleted.", "//  - logExpense keeps ONE row per expense: when an expense's date moves to", "//    another month, the old row in the old month's tab is removed (this is how", "//    the same ID came to appear twice and be counted twice).", "//  - fixDuplicateIds(): run ONCE from the editor to clean up rows that were", "//    already duplicated. Every removed row is copied to Duplicate_Rows_Removed.", "var SS_ID=SpreadsheetApp.getActiveSpreadsheet().getId();", "var DEL_TAB=\"Deleted_Expenses\";", "function doGet(e){try{var a=e.parameter.action||\"\";", "  if(a==\"ping\")return j({pong:true,v:38});", "  if(a==\"logExpense\")return logExp(e.parameter);", "  if(a==\"getExpenses\")return getExps(e.parameter);", "  if(a==\"getAllExpenses\")return getAll();", "  if(a==\"deleteExpense\")return delExp(e.parameter);", "  if(a==\"getDeleted\")return j({ids:deletedIds()});", "  return j({error:\"unknown\"});}catch(err){return j({error:err.message});}}", "function j(o){return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);}", "function getSheet(date){var ss=SpreadsheetApp.openById(SS_ID);var m=(date||\"\").slice(0,7)||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),\"yyyy-MM\");var name=\"Expenses_\"+m;var sh=ss.getSheetByName(name)||ss.insertSheet(name);if(sh.getLastRow()===0){var h=[\"ID\",\"Date\",\"Party\",\"Category\",\"Item\",\"State\",\"Total\",\"Paid\",\"Balance\",\"GST Mode\",\"GST Rate\",\"GST Amt\",\"Base Amt\",\"Payment\",\"Ref\",\"Drive Link\",\"Description\",\"Role\",\"Synced\"];sh.appendRow(h);sh.getRange(1,1,1,h.length).setFontWeight(\"bold\").setBackground(\"#1A3A1F\").setFontColor(\"#fff\");sh.setFrozenRows(1);}return sh;}", "function expTabs(ss){return ss.getSheets().filter(function(sh){return sh.getName().indexOf(\"Expenses_\")===0;});}", "function delTab(ss){var sh=ss.getSheetByName(DEL_TAB);if(!sh){sh=ss.insertSheet(DEL_TAB);sh.appendRow([\"ID\",\"Deleted At\",\"Role\",\"Date\",\"Party\",\"Total\",\"Removed From\"]);sh.getRange(1,1,1,7).setFontWeight(\"bold\");sh.setFrozenRows(1);}return sh;}", "function deletedIds(){var ss=SpreadsheetApp.openById(SS_ID);var sh=ss.getSheetByName(DEL_TAB);if(!sh||sh.getLastRow()<2)return [];return sh.getRange(2,1,sh.getLastRow()-1,1).getValues().map(function(r){return String(r[0]);}).filter(function(x){return x!==\"\";});}", "// Removes every row carrying this ID, in every Expenses_ tab, except the one row", "// to keep (keepName/keepRow). Returns what was removed.", "function removeId(ss,id,keepName,keepRow){var removed=[];expTabs(ss).forEach(function(sh){var last=sh.getLastRow();if(last<2)return;var ids=sh.getRange(2,1,last-1,1).getValues();for(var r=ids.length-1;r>=0;r--){if(String(ids[r][0])!==id)continue;var rowNo=r+2;if(sh.getName()===keepName&&rowNo===keepRow)continue;removed.push({tab:sh.getName(),vals:sh.getRange(rowNo,1,1,sh.getLastColumn()).getValues()[0]});sh.deleteRow(rowNo);if(sh.getName()===keepName&&rowNo<keepRow)keepRow--;}});return removed;}", "function logExp(p){var lock=LockService.getScriptLock();try{lock.waitLock(30000);}catch(e){return j({error:\"busy, try again\"});}try{", "  var id=String(p.expId||\"\");if(!id)return j({error:\"no id\"});", "  if(deletedIds().indexOf(id)>=0)return j({status:\"deleted\"});", "  var ss=SpreadsheetApp.openById(SS_ID);var sh=getSheet(p.date);", "  var now=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),\"dd/MM/yyyy HH:mm\");", "  var row=[p.expId,p.date,p.party,p.category,p.item||\"\",p.state||\"\",+p.total||0,+p.paid||0,+p.balance||0,p.gstMode||\"none\",p.gstRate||\"\",+p.gstAmt||0,+p.baseAmt||0,p.payMethod||\"\",p.ref||\"\",p.driveLink||\"\",p.desc||\"\",p.role||\"\",now];", "  var at=-1,last=sh.getLastRow();", "  if(last>=2){var ids=sh.getRange(2,1,last-1,1).getValues();for(var r=0;r<ids.length;r++){if(String(ids[r][0])===id){at=r+2;break;}}}", "  var st;", "  if(at>0){sh.getRange(at,1,1,row.length).setValues([row]);st=\"updated\";}", "  else{sh.appendRow(row);at=sh.getLastRow();st=\"ok\";}", "  sh.getRange(at,1,1,row.length).setBackground(+p.balance>0?\"#FFEBEE\":\"#E8F5E9\");", "  removeId(ss,id,sh.getName(),at);            // one row per expense, in its own month", "  return j({status:st});}finally{lock.releaseLock();}}", "// Dates are returned as plain yyyy-MM-dd. Returning raw Date cells made them", "// UTC ISO strings, which shifted every expense back one day in IST.", "function fmtd(v){if(Object.prototype.toString.call(v)===\"[object Date]\")return Utilities.formatDate(v,Session.getScriptTimeZone(),\"yyyy-MM-dd\");return String(v||\"\").slice(0,10);}", "function rowsOf(sh){var data=sh.getDataRange().getValues();if(data.length<2)return [];var headers=data[0];return data.slice(1).map(function(r){var o={};headers.forEach(function(h,i){o[h]=(h==\"Date\")?fmtd(r[i]):r[i];});return o;}).filter(function(o){return o.ID!==\"\"&&o.ID!=null;});}", "function getExps(p){var ss=SpreadsheetApp.openById(SS_ID);var month=p.month||Utilities.formatDate(new Date(),Session.getScriptTimeZone(),\"yyyy-MM\");var sh=ss.getSheetByName(\"Expenses_\"+month);if(!sh)return j({expenses:[],month:month});var rows=rowsOf(sh);return j({expenses:rows,month:month,count:rows.length});}", "function getAll(){var ss=SpreadsheetApp.openById(SS_ID);var out=[];expTabs(ss).forEach(function(sh){out=out.concat(rowsOf(sh));});return j({expenses:out,count:out.length});}", "function delExp(p){var lock=LockService.getScriptLock();try{lock.waitLock(30000);}catch(e){return j({error:\"busy\"});}try{", "  var id=String(p.expId||\"\");if(!id)return j({error:\"no id\"});", "  var ss=SpreadsheetApp.openById(SS_ID);", "  var removed=removeId(ss,id,null,-1);", "  if(deletedIds().indexOf(id)<0){var v=removed.length?removed[0].vals:[];", "    delTab(ss).appendRow([id,Utilities.formatDate(new Date(),Session.getScriptTimeZone(),\"dd/MM/yyyy HH:mm\"),p.role||\"\",v[1]||\"\",v[2]||\"\",v[6]||\"\",removed.map(function(x){return x.tab;}).join(\", \")]);}", "  return j({status:removed.length?\"deleted\":\"notfound\",rows:removed.length});}finally{lock.releaseLock();}}", "function doPost(e){try{var p=JSON.parse(e.postData.contents);if((p.action||\"\")==\"uploadDoc\")return uploadDoc(p);return j({error:\"unknown\"});}catch(err){return j({error:err.message});}}", "function uploadDoc(p){var fs=DriveApp.getFoldersByName(\"Gaavn Expense Docs\");var folder=fs.hasNext()?fs.next():DriveApp.createFolder(\"Gaavn Expense Docs\");var bytes=Utilities.base64Decode(p.data);var blob=Utilities.newBlob(bytes,p.mimeType||\"application/octet-stream\",((p.expId||\"doc\")+\"_\"+(p.filename||\"file\")));var file=folder.createFile(blob);file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW);return j({url:file.getUrl(),id:file.getId()});}", "// Run ONCE from the editor (select fixDuplicateIds > Run). Keeps one row per ID:", "// the copy filed in its own month's tab, most recently synced; every other copy", "// is removed and first copied to the Duplicate_Rows_Removed tab.", "function fixDuplicateIds(){var lock=LockService.getScriptLock();lock.waitLock(30000);try{", "  var ss=SpreadsheetApp.openById(SS_ID),tz=Session.getScriptTimeZone(),occ={};", "  expTabs(ss).forEach(function(sh){var last=sh.getLastRow();if(last<2)return;var w=sh.getLastColumn();var data=sh.getRange(2,1,last-1,w).getValues();", "    data.forEach(function(r,i){var id=String(r[0]||\"\");if(!id)return;(occ[id]=occ[id]||[]).push({sh:sh,row:i+2,vals:r});});});", "  function month(d){return Object.prototype.toString.call(d)===\"[object Date]\"?Utilities.formatDate(d,tz,\"yyyy-MM\"):String(d||\"\").slice(0,7);}", "  function synced(v){if(Object.prototype.toString.call(v)===\"[object Date]\")return v.getTime();var m=String(v||\"\").match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4}) (\\d{2}):(\\d{2})/);return m?new Date(+m[3],+m[2]-1,+m[1],+m[4],+m[5]).getTime():0;}", "  var log=ss.getSheetByName(\"Duplicate_Rows_Removed\");", "  if(!log){log=ss.insertSheet(\"Duplicate_Rows_Removed\");log.appendRow([\"Removed At\",\"Tab\",\"Row\",\"ID\",\"Date\",\"Party\",\"Total\",\"Paid\",\"Kept (tab / row)\"]);log.setFrozenRows(1);}", "  var toDel=[];", "  Object.keys(occ).forEach(function(id){var list=occ[id];if(list.length<2)return;", "    var own=list.filter(function(o){return o.sh.getName()===\"Expenses_\"+month(o.vals[1]);});", "    var pool=own.length?own:list;", "    var keep=pool.reduce(function(a,b){return synced(b.vals[18])>synced(a.vals[18])?b:a;});", "    list.forEach(function(o){if(o===keep)return;toDel.push(o);", "      log.appendRow([new Date(),o.sh.getName(),o.row,id,o.vals[1],o.vals[2],o.vals[6],o.vals[7],keep.sh.getName()+\" / \"+keep.row]);});});", "  toDel.sort(function(a,b){if(a.sh.getName()!==b.sh.getName())return a.sh.getName()<b.sh.getName()?-1:1;return b.row-a.row;})", "       .forEach(function(o){o.sh.deleteRow(o.row);});", "  Logger.log(\"Removed \"+toDel.length+\" duplicate row(s). Each one is listed in the Duplicate_Rows_Removed tab.\");", "  return toDel.length;}finally{lock.releaseLock();}}"].join('\n');
 }
 
 function openModal(id){document.getElementById(id).classList.add('open');}
@@ -2938,6 +2959,16 @@ function autoCategorizeTxn(desc, amount) {
   return {cat: cat || '', party: party || extractPartyName(desc), item: item || ''};
 }
 
+/* v38: the party as it is already spelled in the app, if it exists. */
+function canonicalParty(name){
+  var k=String(name||'').trim().toLowerCase();
+  if(!k) return name;
+  var p=(S.parties||[]).find(function(x){return (x.name||'').trim().toLowerCase()===k;});
+  if(p) return p.name.trim();
+  var e=(S.expenses||[]).find(function(x){return (x.party||'').trim().toLowerCase()===k;});
+  return e ? e.party.trim() : name;
+}
+
 function extractPartyName(desc) {
   // Extract meaningful name from UPI description like "UPI/SHUBHAM CARRY/gpay-..."
   var m = desc.match(/UPI\/([^\/]+)\//i);
@@ -3015,15 +3046,32 @@ function matchAndShowResults(txns) {
   }
   var exactMatched = [], probableMatched = [], missing = [], skipped = [];
   var learned = getLearnedPatterns();
+  /* v38: one expense in the app can match only ONE statement line. Two ₹500
+     fuel fills used to both "match" the same app entry, so the second was
+     never flagged — and when it was added it came in under the statement's
+     name, a duplicate you then had to find and delete. */
+  var _claimed = {};
+  var _free = function(e){ return !_claimed[e.id]; };
+  var _claim = function(e){ if(e) _claimed[e.id]=1; return e; };
 
   txns.forEach(function(txn) {
     var autoInfo = autoCategorizeTxn(txn.desc, txn.amount);
     if(!autoInfo) { skipped.push(txn); return; }
+    /* v38: name a NEW line the way you name it, not the way the bank does.
+       1. a match you confirmed before ("BHONGLE PETROL" → Shubham Carry)
+       2. an existing party, spelled as you spell it
+       3. only then the statement's own wording */
+    var _lp = lookupLearnedPattern(txn.desc);
+    if(_lp && _lp.party){
+      autoInfo = {cat:_lp.category||autoInfo.cat, party:_lp.party, item:_lp.item||autoInfo.item};
+    } else {
+      autoInfo.party = canonicalParty(autoInfo.party);
+    }
 
     // TIER 1: Exact match — same date + same amount in expenses
-    var exactMatch = S.expenses.find(function(e) {
-      return e.date === txn.date && Math.abs((e.total||0) - txn.amount) < 2;
-    });
+    var exactMatch = _claim(S.expenses.find(function(e) {
+      return _free(e) && e.date === txn.date && Math.abs((e.total||0) - txn.amount) < 2;
+    }));
     if(exactMatch) {
       txn.matchType = 'exact';
       txn.matchedExp = exactMatch;
@@ -3035,10 +3083,10 @@ function matchAndShowResults(txns) {
     var learnedMatch = lookupLearnedPattern(txn.desc);
     if(learnedMatch) {
       // Check if there's an expense with same amount (any date ±3 days) using learned party
-      var approxMatch = S.expenses.find(function(e) {
+      var approxMatch = _claim(S.expenses.find(function(e) {
         var dayDiff = Math.abs(new Date(e.date) - new Date(txn.date)) / 86400000;
-        return dayDiff <= 3 && Math.abs((e.total||0) - txn.amount) < 2;
-      });
+        return _free(e) && dayDiff <= 3 && Math.abs((e.total||0) - txn.amount) < 2;
+      }));
       if(approxMatch) {
         txn.matchType = 'learned';
         txn.matchedExp = approxMatch;
@@ -3058,6 +3106,7 @@ function matchAndShowResults(txns) {
        your own explanation was right.
        Now ±3 days, closest first, so the true purchase date wins. */
     var _cands = S.expenses.filter(function(e) {
+      if(!_free(e)) return false;
       var sameAmt = Math.abs((e.total||0) - txn.amount) < 2;
       var dayDiff = Math.abs(new Date(e.date) - new Date(txn.date)) / 86400000;
       return sameAmt && dayDiff <= 3;
@@ -3065,7 +3114,7 @@ function matchAndShowResults(txns) {
       return Math.abs(new Date(a.date)-new Date(txn.date))
            - Math.abs(new Date(b.date)-new Date(txn.date));
     });
-    var probableMatch = _cands[0];
+    var probableMatch = _claim(_cands[0]);
     if(probableMatch){
       txn._dayGap = Math.round(Math.abs(new Date(probableMatch.date) - new Date(txn.date))/86400000);
     }
@@ -3086,17 +3135,18 @@ function matchAndShowResults(txns) {
     }
 
     // TIER 4: Amount-only match — same amount within 3 days, no date match
-    var amountMatch = S.expenses.find(function(e) {
+    var amountMatch = _claim(S.expenses.find(function(e) {
       var sameAmt = Math.abs((e.total||0) - txn.amount) < 2;
       var dayDiff = Math.abs(new Date(e.date) - new Date(txn.date)) / 86400000;
-      return sameAmt && dayDiff <= 3 && dayDiff > 0;
-    });
+      return _free(e) && sameAmt && dayDiff <= 3 && dayDiff > 0;
+    }));
     if(amountMatch) {
       txn.matchType = 'amount_nearby';
       txn.matchedExp = amountMatch;
-      txn.autoCat   = autoInfo.cat || amountMatch.category;
-      txn.autoParty = autoInfo.party;
-      txn.autoItem  = autoInfo.item || amountMatch.item;
+      txn.autoCat   = amountMatch.category || autoInfo.cat;     // v38: the app's names win
+      txn.autoParty = amountMatch.party || autoInfo.party;
+      txn.autoItem  = amountMatch.item || autoInfo.item;
+      txn._appDate  = amountMatch.date;
       probableMatched.push(txn);
       return;
     }
