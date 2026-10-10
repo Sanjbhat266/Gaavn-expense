@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta name="app-version" content="39">
+<meta name="app-version" content="42">
 <title>Gaavn Fresh - Expense Tracker</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -172,7 +172,7 @@ datalist{display:none;}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Expenses</div>
     <div class="topbar-right">
-      <span id="sync-chip" onclick="cloudSync(false)" title="Tap to sync" style="font-size:11px;color:var(--cream);opacity:0.85;font-weight:700;margin-right:8px;cursor:pointer;">&#9729;</span><span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v39</span>
+      <span id="sync-chip" onclick="cloudSync(false)" title="Tap to sync" style="font-size:11px;color:var(--cream);opacity:0.85;font-weight:700;margin-right:8px;cursor:pointer;">&#9729;</span><span style="font-size:11px;color:var(--cream);opacity:0.6;font-weight:600;margin-right:2px;">v42</span>
       <button class="icon-btn" id="btn-add-exp" onclick="showAddExpense()">+ Add</button>
     </div>
   </div>
@@ -309,6 +309,19 @@ datalist{display:none;}
       </div>
     </div>
     <div class="card" style="margin-bottom:10px;">
+      <div class="card-head"><div class="card-title">&#129529; Fix categories of imported entries</div></div>
+      <div class="card-body">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.6;">
+          Up to v40 the statement import filed every NEFT payment of &#8377;5,000 or more as SALARY, and every
+          card fuel surcharge as WOOD FUEL. This lists imported entries filed as SALARY for a party you do not
+          pay salary to, surcharges not filed with a fuel (each is matched to the petrol / diesel / CNG purchase
+          it was charged on), and imported entries filed differently from how you file that party yourself.
+        </div>
+        <button class="btn btn-amber btn-sm" onclick="catFixOpen()">Find wrongly filed entries</button>
+        <div id="catfix-list" style="margin-top:10px;"></div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:10px;">
       <div class="card-head"><div class="card-title">Production Tracker &mdash; Materials &amp; Credit</div></div>
       <div class="card-body">
         <div class="form-group">
@@ -432,6 +445,7 @@ datalist{display:none;}
       <div id="mat-lines"></div>
       <div id="mat-total" style="font-size:12px;font-weight:700;text-align:right;margin-top:8px;"></div>
       <div id="mat-warn" style="font-size:11px;color:#C62828;margin-top:6px;"></div>
+      <div id="mat-adv" style="margin-top:8px;"></div>
     </div>
     <div class="form-row">
       <div class="form-group">
@@ -484,7 +498,7 @@ datalist{display:none;}
       <div class="form-group">
         <label class="form-label" id="total-amount-label">Total Amount *</label>
         <div class="input-pfx"><span class="input-pfx-label">&#8377;</span>
-          <input type="number" class="form-input" id="exp-total" placeholder="0" oninput="recalcAmounts()">
+          <input type="number" class="form-input" id="exp-total" placeholder="0" oninput="MAT.totalManual=true;recalcAmounts();if(typeof matRecalc==='function'&&document.getElementById('mat-panel').style.display!=='none')matRecalc();">
         </div>
       </div>
       <div class="form-group">
@@ -1021,6 +1035,7 @@ async function cloudPull(scope){
       ||((ex.category||'')!==rec.category)||((ex.party||'')!==rec.party)||(!ex.payMethodId&&rec.payMethodId);
     if(changed){
       rec.matLines=ex.matLines||[];
+      if(ex.advLinks)rec.advLinks=ex.advLinks; if(ex.advFor)rec.advFor=ex.advFor; if(ex.goods)rec.goods=ex.goods;
       rec.createdAt=ex.createdAt; rec.updatedAt=ex.updatedAt;
       S.expenses[S.expenses.indexOf(ex)]=rec;
       byId[id]=rec; fixed++;
@@ -1176,7 +1191,7 @@ function syncStatusHTML(){
    incognito had v33). The app now asks the server what the current version
    is and offers a one-tap, cache-busting reload.
    ══════════════════════════════════════════════════════════════════════ */
-var APP_VERSION=39, _remoteVersion=null;
+var APP_VERSION=42, _remoteVersion=null;
 
 async function checkForUpdate(silent){
   try{
@@ -1340,6 +1355,8 @@ window.addEventListener('pagehide',function(){
 
 
 function _init(){
+  setTimeout(function(){ ['exp-party','exp-date'].forEach(function(id){ var el=document.getElementById(id); if(!el)return;
+    ['change','blur'].forEach(function(ev){ el.addEventListener(ev,function(){ var p=document.getElementById('mat-panel'); if(p&&p.style.display!=='none') matRenderAdv(); }); }); }); },0);
   S.expenses=JSON.parse(localStorage.getItem(LS_EXP)||'[]');
   S.cats=JSON.parse(localStorage.getItem(LS_CAT)||'null')||DEFAULT_CATS.slice();
   S.items=JSON.parse(localStorage.getItem(LS_ITEMS)||'{}');
@@ -1607,7 +1624,7 @@ function showAddExpense(){
   var _ef=document.getElementById('exp-file'); if(_ef)_ef.value='';
   var _efs=document.getElementById('exp-file-status'); if(_efs)_efs.textContent='';
   setGstMode('none');
-  MAT.lines=[]; matOnCategory('');
+  MAT.lines=[]; MAT.adv={}; MAT.totalManual=false; matOnCategory('');
   populatePartyDL();
   openModal('modal-expense');
 }
@@ -1616,6 +1633,7 @@ function showEditExpense(id){
   var e=S.expenses.find(function(x){return x.id===id;});
   if(!e)return;
   closeModal('modal-view-exp');
+  MAT.lines=[]; MAT.adv={}; MAT.totalManual=true;   // v40: never touch the saved total while the form fills
   document.getElementById('exp-modal-title').textContent='Edit Expense';
   document.getElementById('exp-edit-id').value=id;
   document.getElementById('exp-party').value=e.party||'';
@@ -1639,6 +1657,9 @@ function showEditExpense(id){
     recalcAmounts();
   }
   MAT.lines=(e.matLines||[]).map(function(L){return {itemId:L.itemId,qty:L.qty,rate:L.rate,amount:L.amount};});
+  MAT.adv={}; (e.advLinks||[]).forEach(function(a){ MAT.adv[a.id]=matNum(a.amt); });
+  var _ls=MAT.lines.reduce(function(t,L){return t+matNum(L.amount);},0);
+  MAT.totalManual = !(_ls>0) || Math.abs(matNum(e.total)-(_ls-matAdvSum()))>0.5;
   matOnCategory(e.category||'');
   openModal('modal-expense');
 }
@@ -1724,6 +1745,13 @@ function saveExpense(){
     baseAmount:gstMode!=='none'?baseAmt:null,
     updatedAt:Date.now(),role:S.role
   };
+  /* v40: advances counted towards this bill */
+  obj.advLinks=(obj.matLines.length?Object.keys(MAT.adv||{}):[]).map(function(aid){
+    var a=S.expenses.find(function(x){return x.id===aid;}); return a?{id:aid,amt:matNum(a.total),date:a.date}:null; }).filter(Boolean);
+  if(obj.matLines.length) obj.goods=Math.round(obj.matLines.reduce(function(t,L){return t+matNum(L.amount);},0)*100)/100;
+  obj.desc = obj.advLinks.length
+    ? advTag(obj.desc,'[Advance adjusted: '+obj.advLinks.map(function(a){return matMoney(a.amt)+' of '+a.date;}).join(', ')+']')
+    : advStrip(obj.desc);
   if(!editId)obj.createdAt=Date.now();
   if(editId){
     var idx=S.expenses.findIndex(function(x){return x.id===editId;});
@@ -1733,6 +1761,8 @@ function saveExpense(){
   }
   saveExpenses();
   if(S.url)syncToSheet(obj);
+  var _moved=matLinkAdvances(obj);
+  if(_moved) setTimeout(function(){ showToast(_moved+' advance entr'+(_moved===1?'y':'ies')+' moved to '+obj.category+' so the bill is counted once'); },1800);
   matAfterSave(obj,editId);
   closeModal('modal-expense');
   renderDashboard();
@@ -1744,6 +1774,9 @@ function deleteExpense(id){
   if(!confirm('Delete this expense?'))return;
   var _gone=S.expenses.find(function(x){return x.id===id;});
   if(_gone && (_gone.matLines||[]).length) ptPost('PURCHASE_BILL_DELETE',{id:id});
+  if(_gone) matUnlinkBill(id);                  // v40: its advances become free again
+  if(_gone && _gone.advFor){ var _b=S.expenses.find(function(x){return x.id===_gone.advFor;});
+    if(_b){ _b.advLinks=(_b.advLinks||[]).filter(function(a){return a.id!==id;}); setTimeout(function(){ showToast('That was an advance for the '+_b.date+' '+_b.party+' bill — open that bill and re-save it'); },1800); } }
   S.expenses=S.expenses.filter(function(x){return x.id!==id;});
   saveExpenses();
   tombAdd(id);                                  // never resurrect it on the next pull
@@ -2910,6 +2943,15 @@ function autoCategorizeTxn(desc, amount) {
   var d = desc.toLowerCase();
   var cat = '', party = '', item = '';
 
+  /* v42: the card's fuel surcharge and the GST on it. v41 and earlier tested
+     the word "fuel" first, so every surcharge line became WOOD FUEL (and the
+     GST lines whatever was learned last, e.g. LEGAL). They belong with the
+     petrol / diesel / CNG purchase they were charged on — that pairing is
+     done in matchAndShowResults, where the whole statement is visible. */
+  if(d.includes('surcharge')) {
+    return {cat:'', party:'', item: /gst|igst|cgst|sgst|tax/.test(d) ? 'GST on Fuel Surcharge' : 'Fuel Surcharge', surcharge: /gst|igst|cgst|sgst|tax/.test(d) ? 'gst' : 'fee'};
+  }
+
   // Fuel patterns
   if(d.includes('petroleum') || d.includes('petrol') || d.includes('fuel station') || d.includes('bhongle') || d.includes('jagtap petroleum') || d.includes('wandhekar') || d.includes('balaji petroleum') || d.includes('komal anant')) {
     cat='PETROL'; party=extractPartyName(desc); item='Petrol';
@@ -2919,7 +2961,13 @@ function autoCategorizeTxn(desc, amount) {
     cat='WOOD FUEL'; party=extractPartyName(desc);
   }
   // Salary
-  else if(d.includes('salary') || d.includes('neft') && amount >= 5000) {
+  /* v41: was  d.includes('salary') || d.includes('neft') && amount >= 5000.
+     That filed EVERY NEFT of ₹5,000 or more as SALARY — suppliers (Gurunanak,
+     Sakshi Enterprises), the milk vendor (Deepak Laxman Bhise), Westwall Studio.
+     "+ Add All Missing" then saved them without anyone looking. Now only a
+     bank line that says "salary" is salary; any other NEFT gets the category
+     you normally use for that party, or "Needs category". */
+  else if(d.includes('salary')) {
     cat='SALARY'; party=extractNEFTParty(desc);
   }
   // Utilities
@@ -2992,6 +3040,7 @@ function getLearnedPatterns() {
   try { return JSON.parse(localStorage.getItem(LS_IMPORT_LEARN)||'{}'); } catch(e) { return {}; }
 }
 function saveLearnedPattern(stmtDesc, party, category, item) {
+  if(/surcharge/i.test(stmtDesc||'')) return;   // v42: all surcharge lines read alike; the fuel they belong to decides
   var patterns = getLearnedPatterns();
   // Key: first 30 chars of desc normalized (handles slight variations)
   var key = normalizeDescKey(stmtDesc);
@@ -2999,6 +3048,7 @@ function saveLearnedPattern(stmtDesc, party, category, item) {
   localStorage.setItem(LS_IMPORT_LEARN, JSON.stringify(patterns));
 }
 function lookupLearnedPattern(stmtDesc) {
+  if(/surcharge/i.test(stmtDesc||'')) return null;   // v42
   var patterns = getLearnedPatterns();
   var key = normalizeDescKey(stmtDesc);
   // Exact key match
@@ -3010,6 +3060,220 @@ function lookupLearnedPattern(stmtDesc) {
   }
   return null;
 }
+/* v40: lines that are not expenses at all — money moved between your own
+   accounts. Built in: "SENT MONEY TO OWN …", "own a/c", "self transfer".
+   Plus your own rules ("Always ignore lines like this"), kept on this
+   device. Skipped lines are listed under the summary with the reason, so
+   nothing disappears silently. */
+var LS_IMPORT_IGNORE='gf_import_ignore';
+var IMPORT_OWN_TRANSFER=/sent money to own|money to own|to own a\/?c|own a\/c|own account|self transfer|transfer to self|\bto self\b|sweep (in|out)/i;
+function importIgnoreRules(){ try{ var r=JSON.parse(localStorage.getItem(LS_IMPORT_IGNORE)||'[]'); return Array.isArray(r)?r:[]; }catch(e){ return []; } }
+function importIgnoreSaveRules(r){ try{ localStorage.setItem(LS_IMPORT_IGNORE,JSON.stringify(r)); }catch(e){} }
+function importSkipReason(desc){
+  var d=String(desc||'').toLowerCase();
+  var r=importIgnoreRules().filter(function(x){ return x&&x.text&&d.indexOf(String(x.text).toLowerCase())>=0; })[0];
+  if(r) return 'your rule “'+r.text+'”';
+  if(IMPORT_OWN_TRANSFER.test(d)) return 'own-account transfer';
+  return '';
+}
+function importIgnoreSuggest(desc){
+  var s=String(desc||'').toLowerCase();
+  var cut=s.search(/\d{5,}/); if(cut>0) s=s.slice(0,cut);
+  return s.replace(/[\s\/:\-]+$/,'').trim().slice(0,40);
+}
+function importIgnoreOpen(){
+  var idx=parseInt(document.getElementById('import-item-idx').value);
+  var txn=_missingTxns[idx]; if(!txn) return;
+  document.getElementById('import-ignore-text').value=importIgnoreSuggest(txn.desc);
+  document.getElementById('import-ignore-box').style.display='block';
+}
+function importIgnoreSave(){
+  var t=(document.getElementById('import-ignore-text').value||'').trim().toLowerCase();
+  if(t.length<4){ showToast('Type at least 4 letters'); return; }
+  var r=importIgnoreRules();
+  if(!r.some(function(x){ return String(x.text).toLowerCase()===t; })) r.push({text:t,addedAt:new Date().toISOString()});
+  importIgnoreSaveRules(r);
+  var n=0;
+  _missingTxns.forEach(function(x,i){
+    if(x._done||x._ignored) return;
+    if(String(x.desc||'').toLowerCase().indexOf(t)<0) return;
+    x._ignored=true; x._ruled=true; n++;
+    var el=document.getElementById('missing-item-'+i);
+    if(el){ el.style.opacity='0.4'; el.innerHTML='<div style="font-size:12px;color:var(--muted);font-weight:600;">🚫 Ignored by rule “'+t+'” · '+fmtM(x.amount)+' · '+x.date+'</div>'; }
+  });
+  document.getElementById('import-ignore-box').style.display='none';
+  importRulesRender();
+  showToast('Rule saved — '+n+' line(s) ignored now, and every time from now on');
+  var idx=parseInt(document.getElementById('import-item-idx').value), next=idx+1;
+  while(next<_missingTxns.length && (_missingTxns[next]._done||_missingTxns[next]._ignored)) next++;
+  if(next<_missingTxns.length) openImportItemAt(next); else { closeModal('modal-import-item'); showToast('All items reviewed'); }
+}
+function importIgnoreRemove(i){
+  var r=importIgnoreRules(); var gone=r.splice(i,1)[0]; importIgnoreSaveRules(r); importRulesRender();
+  if(gone) showToast('Rule removed — upload the statement again to see those lines');
+}
+function importRulesRender(){
+  var el=document.getElementById('import-rules-list'); if(!el) return;
+  var r=importIgnoreRules();
+  el.innerHTML='<div style="color:var(--muted);margin-bottom:4px;">Always ignored: own-account transfers (built in)'+(r.length?', and lines containing:':'.')+'</div>'
+    + r.map(function(x,i){ return '<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #eee;"><span>“'+x.text+'”</span>'
+      +'<button onclick="importIgnoreRemove('+i+')" style="background:none;border:1px solid var(--red);color:var(--red);border-radius:6px;font-size:11px;padding:1px 8px;cursor:pointer;">remove</button></div>'; }).join('');
+}
+
+/* v41: the category a party is normally filed under, from entries typed
+   by hand (not imported) — so an import cannot vote for itself. */
+function partyUsualCategory(party){
+  var k=String(party||'').trim().toLowerCase(); if(!k) return null;
+  var n={}, best=null;
+  (S.expenses||[]).forEach(function(e){
+    if(String(e.party||'').trim().toLowerCase()!==k) return;
+    if(/^Imported from/i.test(e.desc||'')) return;
+    if(!e.category) return;
+    n[e.category]=(n[e.category]||0)+1;
+  });
+  Object.keys(n).forEach(function(c){ if(!best||n[c]>n[best]) best=c; });
+  return best?{cat:best,count:n[best]}:null;
+}
+
+/* v41: one-time clean-up of what the old NEFT rule taught this device —
+   "this description is SALARY" links learned from wrongly filed lines. */
+(function(){
+  try{
+    if(localStorage.getItem('gf_learn_v41')) return;
+    var p=JSON.parse(localStorage.getItem('gf_import_learn')||'{}'), gone=0;
+    Object.keys(p).forEach(function(k){ if(p[k]&&p[k].category==='SALARY'){ delete p[k]; gone++; } });
+    localStorage.setItem('gf_import_learn',JSON.stringify(p));
+    localStorage.setItem('gf_learn_v41',String(gone));
+  }catch(e){}
+})();
+
+/* ── v41: fix the categories of imported entries ───────────────────── */
+var _catFix=[];
+function catFixSuspects(){
+  return (S.expenses||[]).filter(function(e){
+    if(!/^Imported from/i.test(e.desc||'')) return false;
+    if(/surcharge/i.test((e.party||'')+' '+(e.item||''))) return !isFuelCat(e.category);   // v42
+    var u=partyUsualCategory(e.party);
+    if(e.category==='SALARY'){
+      return !(u && u.cat==='SALARY');                   // salary only if you file this person as salary yourself
+    }
+    return !!(u && u.cat!==e.category && u.count>=2);   // you file this party differently, at least twice
+  }).sort(function(a,b){ return (b.date||'').localeCompare(a.date||''); });
+}
+function catFixOpen(){
+  _catFix=catFixSuspects();
+  var box=document.getElementById('catfix-list'); if(!box) return;
+  if(!_catFix.length){ box.innerHTML='<div style="color:var(--green);font-size:13px;padding:8px 0;">✓ No imported entry looks wrongly filed.</div>'; return; }
+  var opts=function(sel){ return '<option value="">— leave as is —</option>'+S.cats.map(function(c){ return '<option'+(c===sel?' selected':'')+'>'+c+'</option>'; }).join(''); };
+  var tot=_catFix.reduce(function(t,e){ return t+(e.total||0); },0);
+  box.innerHTML='<div style="font-size:12px;margin-bottom:8px;"><b>'+_catFix.length+'</b> imported entr'+(_catFix.length===1?'y':'ies')+' ('+fmtM(tot)+') look wrongly filed. '
+    +'Where you have filed the same party yourself, that category is pre-selected; otherwise pick one. Nothing changes until you tap Apply.</div>'
+    + _catFix.map(function(e,i){
+        var u=partyUsualCategory(e.party);
+        var sug=(u&&u.cat!==e.category)?u.cat:'';
+        var _sf=/surcharge/i.test((e.party||'')+' '+(e.item||''))?surchargeFuelFor(e):null;   // v42
+        if(_sf){ sug=_sf.category; u={cat:_sf.category,why:'charged on '+_sf.party+' '+fmtM(_sf.total)+' ('+_sf.date+')'}; }
+        return '<div style="border-top:1px solid #eee;padding:7px 0;font-size:12px;">'
+          +'<div style="display:flex;justify-content:space-between;"><b>'+e.party+'</b><span>'+fmtM(e.total)+'</span></div>'
+          +'<div style="color:var(--muted);">'+e.date+' · now <b style="color:var(--red);">'+e.category+'</b>'+(u?(u.why?' · surcharge '+u.why:' · you usually file this party as <b>'+u.cat+'</b>'):'')+'</div>'
+          +'<select id="catfix-'+i+'" class="form-input" style="margin-top:4px;font-size:13px;padding:6px 8px;">'+opts(sug)+'</select></div>';
+      }).join('')
+    + '<button class="btn btn-primary btn-sm" style="margin-top:10px;width:100%;" onclick="catFixApply()">Apply the categories chosen above</button>';
+}
+function catFixApply(){
+  var n=0;
+  _catFix.forEach(function(e,i){
+    var el=document.getElementById('catfix-'+i); var c=el?el.value:'';
+    if(!c||c===e.category) return;
+    var x=S.expenses.find(function(y){ return y.id===e.id; }); if(!x) return;
+    x.category=c; x.updatedAt=Date.now(); n++;
+    if(S.url) syncToSheet(x);
+  });
+  saveExpenses();
+  /* re-teach this device: these bank descriptions are NOT salary */
+  try{ var p=JSON.parse(localStorage.getItem('gf_import_learn')||'{}');
+    Object.keys(p).forEach(function(k){ if(p[k]&&p[k].category==='SALARY'){ var u=partyUsualCategory(p[k].party); if(!(u&&u.cat==='SALARY')) delete p[k]; } });
+    localStorage.setItem('gf_import_learn',JSON.stringify(p)); }catch(e){}
+  showToast(n+' entr'+(n===1?'y':'ies')+' re-filed and sent to the Sheet');
+  renderDashboard(); catFixOpen();
+}
+
+/* v42: which purchase a surcharge line belongs to.
+   The card charges ~1% of the fuel bill as a surcharge (e.g. ₹9.11 on ₹911)
+   and 18% GST on that surcharge (₹1.64 on ₹9.11), posted the same day or a
+   day or two later. Each surcharge line takes the category and party of the
+   fuel line it fits best; each GST line follows its surcharge. */
+function isFuelCat(c){ return /petrol|diesel|cng/i.test(String(c||'')); }
+function surchargePair(pool, missing){
+  var fuel = pool.filter(function(t){
+    if(t._ai && t._ai.surcharge) return false;
+    var c = t.matchedExp ? t.matchedExp.category : (t.autoCat || (t._ai&&t._ai.cat));
+    return isFuelCat(c);
+  }).map(function(t){
+    return {t:t, cat: t.matchedExp ? t.matchedExp.category : (t.autoCat||t._ai.cat),
+            party: t.matchedExp ? t.matchedExp.party : (t.autoParty||t._ai.party)};
+  });
+  var dd = function(a,b){ return (new Date(a) - new Date(b)) / 86400000; };   // a after b, in days
+  var used = {};
+  var best = function(target, amt){
+    var c = fuel.map(function(f){
+      var gap = dd(target.date, f.t.date);
+      if(gap < -1 || gap > 4) return null;
+      return {f:f, score: Math.abs(f.t.amount*0.01 - amt)/Math.max(amt,1) + Math.abs(gap)*0.05 + (used[f.t.desc+f.t.date+f.t.amount]?0.5:0)};
+    }).filter(Boolean).sort(function(a,b){ return a.score-b.score; });
+    return c.length ? c[0].f : null;
+  };
+  var fees = missing.filter(function(t){ return t._ai && t._ai.surcharge==='fee'; });
+  var gsts = missing.filter(function(t){ return t._ai && t._ai.surcharge==='gst'; });
+  var allFees = pool.filter(function(t){ return t._ai && t._ai.surcharge==='fee'; });
+  fees.forEach(function(t){
+    var f = best(t, t.amount);
+    if(f){ used[f.t.desc+f.t.date+f.t.amount]=1; t._fuel=f; t.autoCat=f.cat; t.autoParty=f.party||'Fuel Surcharge'; }
+    else { t.autoParty='Fuel Surcharge'; }
+    t.autoItem='Fuel Surcharge';
+  });
+  allFees.forEach(function(t){                       // a fee already in the app still guides its GST line
+    if(t._fuel || !t.matchedExp) return;
+    if(isFuelCat(t.matchedExp.category)) t._fuel={cat:t.matchedExp.category, party:t.matchedExp.party};
+    else { var f=best(t,t.amount); if(f) t._fuel=f; }
+  });
+  gsts.forEach(function(t){
+    var fee = allFees.filter(function(s){ var g=Math.abs(dd(t.date,s.date)); return g<=1 && Math.abs(s.amount*0.18 - t.amount) <= 0.03; })
+      .sort(function(a,b){ return Math.abs(a.amount*0.18-t.amount) - Math.abs(b.amount*0.18-t.amount); })[0];
+    var f = fee && fee._fuel ? fee._fuel : best(t, t.amount/0.18);
+    if(f){ t.autoCat=f.cat; t.autoParty=f.party||'Fuel Surcharge'; } else { t.autoParty='Fuel Surcharge'; }
+    t.autoItem='GST on Fuel Surcharge';
+  });
+}
+
+/* v42: forget what the old import "learned" about surcharge lines — one
+   remembered key was applied to every surcharge on every statement. */
+(function(){
+  try{
+    if(localStorage.getItem('gf_learn_v42')) return;
+    var p=JSON.parse(localStorage.getItem('gf_import_learn')||'{}'), gone=0;
+    Object.keys(p).forEach(function(k){ if(k.indexOf('surcharge')>=0){ delete p[k]; gone++; } });
+    localStorage.setItem('gf_import_learn',JSON.stringify(p));
+    localStorage.setItem('gf_learn_v42',String(gone));
+  }catch(e){}
+})();
+
+/* v42: the fuel entry in the app a surcharge entry belongs to (for the clean-up). */
+function surchargeFuelFor(e){
+  var isGst=/gst/i.test((e.party||'')+' '+(e.item||''));
+  var target = isGst ? e.total/0.18 : e.total;      // the surcharge amount
+  var dd=function(a,b){ return (new Date(a)-new Date(b))/86400000; };
+  var c=(S.expenses||[]).filter(function(x){
+    if(!isFuelCat(x.category) || /surcharge/i.test((x.party||'')+' '+(x.item||''))) return false;
+    var g=dd(e.date,x.date); return g>=-1 && g<=4;
+  }).map(function(x){ return {x:x, s:Math.abs(x.total*0.01-target)/Math.max(target,1)+Math.abs(dd(e.date,x.date))*0.05}; })
+    .sort(function(a,b){ return a.s-b.s; });
+  if(c.length && c[0].s<0.35) return c[0].x;
+  var near=(S.expenses||[]).filter(function(x){ return isFuelCat(x.category) && !/surcharge/i.test((x.party||'')+' '+(x.item||'')) && Math.abs(dd(e.date,x.date))<=3; })
+    .sort(function(a,b){ return Math.abs(dd(e.date,a.date))-Math.abs(dd(e.date,b.date)); });
+  return near[0]||null;
+}
+
 function normalizeDescKey(desc) {
   return desc.toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,25);
 }
@@ -3054,9 +3318,14 @@ function matchAndShowResults(txns) {
   var _free = function(e){ return !_claimed[e.id]; };
   var _claim = function(e){ if(e) _claimed[e.id]=1; return e; };
 
+  /* v40: lines that are not spending (own-account transfers, your ignore
+     rules) are set aside first, with the reason. */
+  var pool = [];
   txns.forEach(function(txn) {
+    var _why = importSkipReason(txn.desc);
+    if(_why) { txn._skipWhy = _why; skipped.push(txn); return; }
     var autoInfo = autoCategorizeTxn(txn.desc, txn.amount);
-    if(!autoInfo) { skipped.push(txn); return; }
+    if(!autoInfo) { txn._skipWhy = 'bank charge / card bill payment'; skipped.push(txn); return; }
     /* v38: name a NEW line the way you name it, not the way the bank does.
        1. a match you confirmed before ("BHONGLE PETROL" → Shubham Carry)
        2. an existing party, spelled as you spell it
@@ -3067,97 +3336,99 @@ function matchAndShowResults(txns) {
     } else {
       autoInfo.party = canonicalParty(autoInfo.party);
     }
+    /* v41: the category YOU use for this party (from entries you typed
+       yourself) wins over a keyword guess. */
+    var _hc = partyUsualCategory(autoInfo.party);
+    if(_hc && !(_lp && _lp.category && _lp.category!=='SALARY')) autoInfo.cat = _hc.cat;
+    txn._ai = autoInfo; txn._lp = _lp;
+    pool.push(txn);
+  });
 
-    // TIER 1: Exact match — same date + same amount in expenses
-    var exactMatch = _claim(S.expenses.find(function(e) {
-      return _free(e) && e.date === txn.date && Math.abs((e.total||0) - txn.amount) < 2;
-    }));
-    if(exactMatch) {
-      txn.matchType = 'exact';
-      txn.matchedExp = exactMatch;
-      exactMatched.push(txn);
-      return;
-    }
-
-    // TIER 2: Learned pattern match — we've seen this desc before and confirmed it
-    var learnedMatch = lookupLearnedPattern(txn.desc);
-    if(learnedMatch) {
-      // Check if there's an expense with same amount (any date ±3 days) using learned party
-      var approxMatch = _claim(S.expenses.find(function(e) {
-        var dayDiff = Math.abs(new Date(e.date) - new Date(txn.date)) / 86400000;
-        return _free(e) && dayDiff <= 3 && Math.abs((e.total||0) - txn.amount) < 2;
-      }));
-      if(approxMatch) {
-        txn.matchType = 'learned';
-        txn.matchedExp = approxMatch;
-        txn.learnedInfo = learnedMatch;
-        exactMatched.push(txn); // treat as matched
-        return;
-      }
-    }
-
-    // TIER 3: Probable match — same amount on same date but no party match
-    // (different station name in desc vs driver name in app)
-    /* v36: this required dayDiff === 0. A card almost always POSTS a day or
-       two after the purchase, so an expense you entered on the 19th could
-       never match a statement line dated the 20th. It fell through to
-       "missing", you added it, and the same spend ended up in the book twice
-       on two different dates. That is the date mismatch you were seeing —
-       your own explanation was right.
-       Now ±3 days, closest first, so the true purchase date wins. */
-    var _cands = S.expenses.filter(function(e) {
-      if(!_free(e)) return false;
-      var sameAmt = Math.abs((e.total||0) - txn.amount) < 2;
-      var dayDiff = Math.abs(new Date(e.date) - new Date(txn.date)) / 86400000;
-      return sameAmt && dayDiff <= 3;
-    }).sort(function(a,b){
-      return Math.abs(new Date(a.date)-new Date(txn.date))
-           - Math.abs(new Date(b.date)-new Date(txn.date));
+  /* v40: v39 matched line by line, in file order, and took the FIRST app
+     entry with the same amount within 3 days — whatever its name or payment
+     method. Two ₹2,000 payments in the same week: the first line in the file
+     took the entry that belonged to the second (e.g. PRAVIN GENERAL's), so the
+     second was shown as "missing" although it was in the app, while the line
+     that really was missing looked matched.
+     Now every possible pair is scored and the best pairs are made first:
+       same day beats a day apart; the entry's name appearing in the bank line
+       (or a name you confirmed before) counts for more than a day; an entry
+       paid from this account (Kotak for a Kotak statement) beats one paid
+       another way. One entry still answers only one line. */
+  var _srcPm = function(e){
+    var pm = S.pm.find(function(p){return p.id===e.payMethodId;});
+    var pn = ((pm&&pm.name)||'').toLowerCase();
+    return _stmtSource==='axis' ? (pn.indexOf('credit')>=0||pn.indexOf('axis')>=0||pn.indexOf('cc')>=0) : (pn.indexOf('kotak')>=0);
+  };
+  var _nm = function(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,''); };
+  var _dd = function(a,b){ return Math.abs(new Date(a) - new Date(b)) / 86400000; };
+  var _pairs = [];
+  pool.forEach(function(txn, ti) {
+    var dn = _nm(txn.desc);
+    S.expenses.forEach(function(e) {
+      if(!e || !e.date) return;
+      var dd = _dd(e.date, txn.date);
+      if(!(dd <= 3)) return;
+      var tol = txn.amount < 50 ? 0.011 : 2;           // v42: a ₹1.07 GST line must not match a ₹1.80 one
+      var amtT = Math.abs((e.total||0) - txn.amount) < tol;
+      var amtP = !amtT && (e.paid||0) > 0 && (e.paid||0) < (e.total||0) && Math.abs((e.paid||0) - txn.amount) < tol;
+      if(!amtT && !amtP) return;
+      var en = _nm(e.party);
+      var nameHit = (txn._lp && _nm(txn._lp.party) === en)
+        || (en.length >= 4 && dn.indexOf(en.slice(0, Math.min(en.length, 8))) >= 0)
+        || (en && _nm(txn._ai.party) === en);
+      _pairs.push({ti:ti, e:e, dd:dd, nameHit:nameHit,
+        score: dd*10 + (nameHit?0:15) + (_srcPm(e)?0:40) + (amtP?2:0)});
     });
-    var probableMatch = _claim(_cands[0]);
-    if(probableMatch){
-      txn._dayGap = Math.round(Math.abs(new Date(probableMatch.date) - new Date(txn.date))/86400000);
+  });
+  _pairs.sort(function(a,b){ return (a.score-b.score) || (a.ti-b.ti); });
+  var _got = {};
+  _pairs.forEach(function(p){
+    if(_got[p.ti] || _claimed[p.e.id]) return;
+    _got[p.ti] = p; _claimed[p.e.id] = p.ti + 1;
+  });
+
+  pool.forEach(function(txn, ti) {
+    var autoInfo = txn._ai, p = _got[ti];
+    if(p && p.dd === 0) {                       // same date, same amount
+      txn.matchType = 'exact'; txn.matchedExp = p.e; exactMatched.push(txn); return;
     }
-    if(probableMatch) {
+    if(p && txn._lp) {                          // a pattern you confirmed before, within 3 days
+      txn.matchType = 'learned'; txn.matchedExp = p.e; txn.learnedInfo = txn._lp; exactMatched.push(txn); return;
+    }
+    if(p) {                                     // same amount, 1–3 days apart: you confirm
+      var probableMatch = p.e;
+      txn._dayGap = Math.round(p.dd);
       txn.matchType = 'probable';
       txn.matchedExp = probableMatch;
       txn.autoCat   = probableMatch.category || autoInfo.cat;
-      /* v36: was autoInfo.party — the name off the statement ("BHONGLE
-         PETROL"). When the app already holds this spend as "Shubham Carry",
-         that is the name that belongs in the Sheet, because it is how you
-         categorise by person and vehicle. The statement's wording is kept in
-         the description for the audit trail. */
       txn.autoParty = probableMatch.party || autoInfo.party;
       txn.autoItem  = probableMatch.item || autoInfo.item;
       txn._appDate  = probableMatch.date;
       probableMatched.push(txn);
       return;
     }
-
-    // TIER 4: Amount-only match — same amount within 3 days, no date match
-    var amountMatch = _claim(S.expenses.find(function(e) {
-      var sameAmt = Math.abs((e.total||0) - txn.amount) < 2;
-      var dayDiff = Math.abs(new Date(e.date) - new Date(txn.date)) / 86400000;
-      return _free(e) && sameAmt && dayDiff <= 3 && dayDiff > 0;
-    }));
-    if(amountMatch) {
-      txn.matchType = 'amount_nearby';
-      txn.matchedExp = amountMatch;
-      txn.autoCat   = amountMatch.category || autoInfo.cat;     // v38: the app's names win
-      txn.autoParty = amountMatch.party || autoInfo.party;
-      txn.autoItem  = amountMatch.item || autoInfo.item;
-      txn._appDate  = amountMatch.date;
-      probableMatched.push(txn);
-      return;
-    }
-
-    // TIER 5: Truly missing
     txn.matchType = 'missing';
     txn.autoCat   = autoInfo.cat;
     txn.autoParty = autoInfo.party;
     txn.autoItem  = autoInfo.item;
+    /* v40: say WHY it is missing — what the app holds for this amount nearby,
+       and whether another bank line already took it. */
+    var near = S.expenses.filter(function(e){
+      return e && e.date && Math.abs((e.total||0) - txn.amount) < 2 && _dd(e.date, txn.date) <= 15;
+    }).sort(function(a,b){ return _dd(a.date,txn.date) - _dd(b.date,txn.date); }).slice(0,3);
+    txn._why = near.map(function(e){
+      var d = Math.round(_dd(e.date, txn.date));
+      var by = _claimed[e.id] ? pool[_claimed[e.id]-1] : null;
+      var pm = S.pm.find(function(x){return x.id===e.payMethodId;});
+      return '<b>'+(e.party||'?')+'</b> '+fmtM(e.total)+' on '+e.date+(pm?' ('+pm.name+')':'')
+        + (by ? ' — already matched to the bank line of '+by.date+' “'+String(by.desc).slice(0,38)+'”'
+              : (d > 3 ? ' — '+d+' days away, too far to match on its own' : ''));
+    }).join('<br>');
     missing.push(txn);
   });
+
+  surchargePair(pool, missing);
 
   // Combine probable + missing for review
   _missingTxns = probableMatched.concat(missing);
@@ -3197,7 +3468,10 @@ function matchAndShowResults(txns) {
     '<div class="summary-chip"><div class="chip-val" style="color:var(--amber);">'+probableMatched.length+'</div><div class="chip-lbl">? Probable</div></div>' +
     '<div class="summary-chip"><div class="chip-val" style="color:var(--red);">'+missing.length+'</div><div class="chip-lbl">✗ Missing</div></div>' +
     '</div>';
-  if(skipped.length) summaryHtml += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">'+skipped.length+' bank charges skipped</div>';
+  if(skipped.length) summaryHtml += '<details style="font-size:11px;color:var(--muted);margin-bottom:8px;"><summary style="cursor:pointer;">'+skipped.length+' line(s) skipped — not expenses (tap to see)</summary>'
+    + skipped.map(function(t){ return '<div style="padding:3px 0;border-bottom:1px solid #eee;">'+t.date+' · '+fmtM(t.amount)+' · '+String(t.desc).slice(0,48)+' <i>('+(t._skipWhy||'skipped')+')</i></div>'; }).join('')
+    + '</details>';
+  summaryHtml += '<details style="font-size:11px;margin-bottom:8px;" ontoggle="importRulesRender()"><summary style="cursor:pointer;color:var(--muted);">🚫 Ignore rules ('+importIgnoreRules().length+')</summary><div id="import-rules-list" style="padding-top:4px;"></div></details>';
   document.getElementById('stmt-summary').innerHTML = summaryHtml;
 
   // Bulk action buttons
@@ -3229,13 +3503,11 @@ function matchAndShowResults(txns) {
     var borderColor = isProbable ? 'var(--amber)' : (txn.autoCat ? 'var(--border)' : 'var(--red)');
     var badge = '';
     if(isProbable) {
-      var dayDiff = txn.matchType === 'amount_nearby'
-        ? Math.round(Math.abs(new Date(txn.matchedExp.date) - new Date(txn.date)) / 86400000)
-        : 0;
+      var dayDiff = Math.round(Math.abs(new Date(txn.matchedExp.date) - new Date(txn.date)) / 86400000);
       badge = '<div style="background:var(--al);border:1px solid var(--amber);border-radius:8px;padding:5px 8px;margin-top:6px;font-size:11px;">'
         + '🔍 <b style="color:var(--amber);">Looks like it\'s already in app</b> — '
         + (dayDiff > 0 ? dayDiff+' day'+(dayDiff>1?'s':'')+' apart · ' : 'same date · ')
-        + '<b>'+txn.matchedExp.party+'</b> · ₹'+fmtM(txn.matchedExp.total)+' · '+txn.matchedExp.category
+        + '<b>'+txn.matchedExp.party+'</b> · '+fmtM(txn.matchedExp.total)+' · '+txn.matchedExp.category
         + '<br><span style="color:var(--muted);">Different name in app (driver) vs statement (station)</span>'
         + (txn._dayGap ? ('<br><span style="color:var(--amber);">\u26A0 statement is '+txn._dayGap+' day(s) later than your entry \u2014 normal for a card. Keeping your date.</span>') : '')
         + '</div>';
@@ -3260,6 +3532,7 @@ function matchAndShowResults(txns) {
       + '<div style="font-size:11px;color:var(--muted);">'+txn.date+'&nbsp;·&nbsp;'+txn.source+'</div>'
       + '<div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+txn.desc.slice(0,55)+'</div>'
       + (isProbable ? badge : '')
+      + (!isProbable && txn._why ? '<div style="font-size:11px;color:#8a6d3b;margin-top:4px;line-height:1.4;">In the app: '+txn._why+'</div>' : '')
       + '</div>'
       + '<div style="text-align:right;flex-shrink:0;margin-left:10px;padding-top:2px;">'
       + '<div style="font-size:15px;font-weight:700;color:var(--amber);">'+fmtM(txn.amount)+'</div>'
@@ -3323,7 +3596,7 @@ function openImportItemAt(idx) {
     meta.innerHTML = txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN') + ' · ' + txn.source
       + '<div style="margin-top:8px;background:var(--al);border:1.5px solid var(--amber);border-radius:8px;padding:8px 10px;font-size:12px;">'
       + '<div style="font-weight:700;color:var(--amber);margin-bottom:4px;">🔍 Looks like it\'s already recorded as:</div>'
-      + '<div><b>'+e.party+'</b> · ₹'+fmtM(e.total)+' · '+e.category+(e.item?' · '+e.item:'')+' · '+e.date+'</div>'
+      + '<div><b>'+e.party+'</b> · '+fmtM(e.total)+' · '+e.category+(e.item?' · '+e.item:'')+' · '+e.date+'</div>'
       + (dayDiff > 0 ? '<div style="color:var(--muted);margin-top:2px;font-size:11px;">Note: date differs by '+dayDiff+' day'+(dayDiff>1?'s':'')+' — driver may have recorded differently</div>' : '')
       + '<div style="margin-top:8px;display:flex;gap:6px;">'
       + '<button onclick="confirmProbableMatch('+idx+')" style="flex:1;background:var(--green);color:#fff;border:none;border-radius:8px;padding:7px;font-size:12px;font-weight:700;cursor:pointer;">✓ Yes, same payment</button>'
@@ -3331,7 +3604,9 @@ function openImportItemAt(idx) {
       + '</div></div>';
   } else {
     meta.textContent = txn.date + ' · ₹' + txn.amount.toLocaleString('en-IN') + ' · ' + txn.source;
+    if(txn._why && !txn._done && !txn._ignored) meta.innerHTML += '<div style="margin-top:8px;background:#FFF8E1;border:1px solid #E0C068;border-radius:8px;padding:7px 9px;font-size:12px;color:#5d4a1f;line-height:1.45;">Same amount in the app nearby:<br>'+txn._why+'<div style="margin-top:4px;color:var(--muted);">If one of these IS this payment, tap “✕ Already Added”. If not, add it below.</div></div>';
   }
+  var _ib=document.getElementById('import-ignore-box'); if(_ib) _ib.style.display='none';
 
   openModal('modal-import-item');
 }
@@ -3644,6 +3919,13 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
       <div id="import-item-desc" style="font-weight:700;margin-bottom:4px;"></div>
       <div id="import-item-meta" style="color:var(--muted);"></div>
     </div>
+    <div style="margin:-6px 0 12px;font-size:12px;">
+      <a href="#" onclick="importIgnoreOpen();return false;" style="color:var(--muted);">🚫 Not an expense (own-account transfer)? Always ignore lines like this…</a>
+      <div id="import-ignore-box" style="display:none;margin-top:6px;">
+        <div style="color:var(--muted);margin-bottom:4px;">Ignore every statement line that contains:</div>
+        <div style="display:flex;gap:6px;"><input id="import-ignore-text" class="form-input" style="flex:1;font-size:13px;padding:7px 8px;"><button class="btn btn-red btn-sm" onclick="importIgnoreSave()">Save rule</button></div>
+      </div>
+    </div>
     <div class="form-group">
       <label class="form-label">Party Name * <span style="font-size:10px;color:var(--muted);font-weight:400;">(type to match existing)</span></label>
       <input type="text" class="form-input" id="import-party" list="import-party-list" autocomplete="off" placeholder="Start typing to pick an existing party">
@@ -3697,7 +3979,7 @@ var LS_PT_URL='gf_pt_url', LS_PT_MAT='gf_pt_materials', LS_PT_MAT_AT='gf_pt_mat_
    touch inventory. */
 var MAT_CATS=['RAW MATERIAL','PACKING MATERIALS','CONSUMABLES'];
 
-var MAT={lines:[], materials:[], creditors:[], payParty:null, payBills:[]};
+var MAT={lines:[], materials:[], creditors:[], payParty:null, payBills:[], adv:{}, totalManual:false};
 
 function ptUrl(){ return (localStorage.getItem(LS_PT_URL)||'').trim(); }
 function matIsMaterialCat(c){ return MAT_CATS.indexOf(String(c||'').toUpperCase())>=0; }
@@ -3793,16 +4075,7 @@ function matRenderLines(){
   wrap.innerHTML=MAT.lines.map(function(L,i){
     var m=matFind(L.itemId);
     var pu=m?(m.purchaseUnit||m.unit||''):'';
-    var per=m?(matNum(m.perPack)||1):1;
-    var stockQty=matNum(L.qty)*per;
-    var amt=matNum(L.amount);
-    var hint='';
-    if(m && stockQty>0){
-      hint = '= <b>'+(Math.round(stockQty*1000)/1000)+' '+(m.unit||'')+'</b> into stock'
-           + (amt>0 ? ' at <b>'+matMoney(amt/stockQty)+'/'+(m.unit||'')+'</b> (ex-GST)' : '');
-    } else if(m && per!==1){
-      hint = '1 '+pu+' = '+per+' '+(m.unit||'');
-    }
+    var hint=matHint(L);
     return ''
     +'<div style="border-top:1px dashed #cfe3d4;padding:8px 0;">'
       +'<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">'
@@ -3811,17 +4084,39 @@ function matRenderLines(){
       +'</div>'
       +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">'
         +'<div><label style="font-size:10px;color:var(--muted);">Qty'+(pu?' ('+pu+')':'')+'</label>'
-          +'<input type="number" class="form-input" style="font-size:13px;padding:7px 8px;" value="'+(L.qty===''?'':L.qty)+'" oninput="matSet('+i+',\'qty\',this.value)"></div>'
+          +'<input type="number" inputmode="decimal" id="mat-q-'+i+'" class="form-input" style="font-size:13px;padding:7px 8px;" value="'+(L.qty===''?'':L.qty)+'" oninput="matSet('+i+',\'qty\',this.value)"></div>'
         +'<div><label style="font-size:10px;color:var(--muted);">Rate'+(pu?' /'+pu:'')+'</label>'
-          +'<input type="number" class="form-input" style="font-size:13px;padding:7px 8px;" value="'+(L.rate===''?'':L.rate)+'" oninput="matSet('+i+',\'rate\',this.value)"></div>'
+          +'<input type="number" inputmode="decimal" id="mat-r-'+i+'" class="form-input" style="font-size:13px;padding:7px 8px;" value="'+(L.rate===''?'':L.rate)+'" oninput="matSet('+i+',\'rate\',this.value)"></div>'
         +'<div><label style="font-size:10px;color:var(--muted);">Amount</label>'
-          +'<input type="number" class="form-input" style="font-size:13px;padding:7px 8px;" value="'+(L.amount===''?'':L.amount)+'" oninput="matSet('+i+',\'amount\',this.value)"></div>'
+          +'<input type="number" inputmode="decimal" id="mat-a-'+i+'" class="form-input" style="font-size:13px;padding:7px 8px;" value="'+(L.amount===''?'':L.amount)+'" oninput="matSet('+i+',\'amount\',this.value)"></div>'
       +'</div>'
-      +(hint?'<div style="font-size:11px;color:#2d5a3d;margin-top:5px;">'+hint+'</div>':'')
+      +'<div id="mat-h-'+i+'" style="font-size:11px;color:#2d5a3d;margin-top:5px;'+(hint?'':'display:none;')+'">'+hint+'</div>'
     +'</div>';
   }).join('');
 
   matRecalc();
+}
+
+function matHint(L){
+  var m=matFind(L.itemId);
+  if(!m) return '';
+  var pu=m.purchaseUnit||m.unit||'';
+  var per=matNum(m.perPack)||1;
+  var stockQty=matNum(L.qty)*per;
+  var amt=matNum(L.amount);
+  if(stockQty>0){
+    return '= <b>'+(Math.round(stockQty*1000)/1000)+' '+(m.unit||'')+'</b> into stock'
+         + (amt>0 ? ' at <b>'+matMoney(amt/stockQty)+'/'+(m.unit||'')+'</b> (ex-GST)' : '');
+  }
+  return per!==1 ? '1 '+pu+' = '+per+' '+(m.unit||'') : '';
+}
+
+/* v40: the box you are typing in is never rebuilt. v39 redrew every line on
+   every digit, so the phone lost the cursor (and the keyboard) after each
+   key. Now only the OTHER boxes of that line are updated, in place. */
+function matPut(id,v){
+  var el=document.getElementById(id);
+  if(el && document.activeElement!==el) el.value=(v===''||v==null)?'':v;
 }
 
 /* Qty x Rate fills Amount; typing an Amount back-solves the Rate. Either way
@@ -3829,23 +4124,136 @@ function matRenderLines(){
 function matSet(i,field,val){
   var L=MAT.lines[i]; if(!L) return;
   L[field]=val;
+  if(field==='itemId'){ matRenderLines(); return; }
   var q=matNum(L.qty), r=matNum(L.rate), a=matNum(L.amount);
-  if(field==='qty'||field==='rate'){ if(q>0&&r>0) L.amount=Math.round(q*r*100)/100; }
-  else if(field==='amount'){ if(q>0&&a>0) L.rate=Math.round(a/q*10000)/10000; }
-  matRenderLines();
+  if(field==='qty'||field==='rate'){ if(q>0&&r>0){ L.amount=Math.round(q*r*100)/100; matPut('mat-a-'+i,L.amount); } }
+  else if(field==='amount'){ if(q>0&&a>0){ L.rate=Math.round(a/q*10000)/10000; matPut('mat-r-'+i,L.rate); } }
+  var hEl=document.getElementById('mat-h-'+i);
+  if(hEl){ var t=matHint(L); hEl.innerHTML=t; hEl.style.display=t?'':'none'; }
+  matRecalc();
 }
+
+/* ── v40: advances and part payments ─────────────────────────────────
+   Each payment stays its own entry, so every bank line still finds exactly
+   one entry in the app. The goods are entered ONCE, on the entry that
+   carries the bill; an advance paid earlier is ticked here and counted
+   towards that bill instead of being added again:
+     items ₹19,000 − advance ₹5,000 (ticked) = this entry ₹14,000
+   Expense total over both entries = ₹19,000 = the bill. Stock is valued at
+   ₹19,000 and the supplier shows nothing outstanding.
+   Anything still unpaid → put what you DID pay in "Amount Paid"; the rest
+   shows as Balance Due (the supplier-credit flow, unchanged). */
+function advStrip(s){ return String(s||'').replace(/\s*\[Advance (adjusted|for bill)[^\]]*\]/g,'').trim(); }
+function advTag(s,tag){ var b=advStrip(s); return (b?b+' ':'')+tag; }
+function matNorm(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,''); }
+function matSameParty(a,b){
+  var x=matNorm(a), y=matNorm(b);
+  if(!x||!y) return false;
+  if(x===y) return true;
+  if(x.length>=5&&y.length>=5&&(x.indexOf(y)>=0||y.indexOf(x)>=0)) return true;
+  return x.length>=6&&y.length>=6&&x.slice(0,6)===y.slice(0,6);
+}
+function matAdvSum(){
+  var ids=Object.keys(MAT.adv||{}), t=0;
+  ids.forEach(function(id){ t+=matNum(MAT.adv[id]); });
+  return Math.round(t*100)/100;
+}
+function matAdvCands(){
+  var party=(document.getElementById('exp-party')||{}).value||'';
+  if(!party.trim()) return [];
+  var editId=(document.getElementById('exp-edit-id')||{}).value||'';
+  var date=(document.getElementById('exp-date')||{}).value||todayStr();
+  return S.expenses.filter(function(e){
+    if(MAT.adv&&MAT.adv[e.id]!=null) return true;                  // already ticked on this bill
+    if(e.id===editId) return false;
+    if(!matSameParty(e.party,party)) return false;
+    if(e.advFor && e.advFor!==editId) return false;                  // counted towards another bill
+    if(!e.advFor && /\[Advance for bill/.test(e.desc||'')) return false;
+    if((e.matLines||[]).some(function(L){ return matNum(L.amount)>0; })) return false;   // a bill itself
+    if(!(matNum(e.total)>0)) return false;
+    var dd=(new Date(date)-new Date(e.date))/86400000;
+    return dd>=0 && dd<=120;
+  }).sort(function(a,b){ return a.date<b.date?1:-1; }).slice(0,8);
+}
+function matAdvToggle(id,on){
+  if(!MAT.adv) MAT.adv={};
+  var e=S.expenses.find(function(x){ return x.id===id; });
+  if(on&&e) MAT.adv[id]=matNum(e.total); else delete MAT.adv[id];
+  if(on) MAT.totalManual=false;
+  matRecalc();
+}
+function matRenderAdv(){
+  var box=document.getElementById('mat-adv');
+  if(!box) return;
+  var sum=MAT.lines.reduce(function(t,L){ return t+matNum(L.amount); },0);
+  if(!(sum>0)){ box.innerHTML=''; return; }
+  var c=matAdvCands();
+  var party=((document.getElementById('exp-party')||{}).value||'').trim();
+  if(!c.length){
+    box.innerHTML='<div style="font-size:11px;color:var(--muted);line-height:1.5;">No earlier payment to '+(party||'this party')
+      +' found to adjust. If part of this bill is still unpaid, enter what you paid in <b>Amount Paid</b> — the rest shows as Balance Due.</div>';
+    return;
+  }
+  box.innerHTML='<div style="font-size:11px;font-weight:700;color:#1A3A1F;margin-bottom:4px;">Advance paid earlier for these goods? Tick it so it counts towards this bill:</div>'
+    + c.map(function(e){
+        var pm=S.pm.find(function(p){ return p.id===e.payMethodId; });
+        var on=MAT.adv&&MAT.adv[e.id]!=null;
+        return '<label style="display:flex;gap:8px;align-items:center;font-size:12px;padding:4px 0;cursor:pointer;">'
+          +'<input type="checkbox" id="mat-adv-'+e.id+'" '+(on?'checked':'')+' onchange="matAdvToggle(\''+e.id+'\',this.checked)">'
+          +'<span><b>'+matMoney(e.total)+'</b> · '+e.date+' · '+(e.party||'')+(pm?' · '+pm.name:'')+(e.category?' · '+e.category:'')+'</span></label>';
+      }).join('')
+    + '<div style="font-size:11px;color:var(--muted);margin-top:2px;">Only tick money that is <b>already entered</b> in the app. Unpaid amounts go in Amount Paid / Balance Due instead.</div>';
+}
+function matUseComputedTotal(){ MAT.totalManual=false; matRecalc(); }
 
 function matRecalc(){
   var sum=MAT.lines.reduce(function(t,L){ return t+matNum(L.amount); },0);
+  var adv=matAdvSum();
   var el=document.getElementById('mat-total');
   var warn=document.getElementById('mat-warn');
-  if(el) el.innerHTML = sum>0 ? 'Items total: '+matMoney(sum) : '';
-  if(sum>0){
-    var tot=document.getElementById('exp-total');
-    if(tot){ tot.value=Math.round(sum*100)/100; recalcAmounts(); }
+  var tot=document.getElementById('exp-total');
+  var want=Math.round(Math.max(0,sum-adv)*100)/100;
+  if(sum>0 && !MAT.totalManual && tot){ tot.value=want; recalcAmounts(); }
+  var mismatch='';
+  if(sum>0 && MAT.totalManual && tot){
+    var t=matNum(tot.value);
+    if(Math.abs(t-want)>0.5){
+      mismatch='<div style="color:#B26A00;font-weight:600;margin-top:4px;">Total Amount is '+matMoney(t)+', items'+(adv>0?' minus advance':'')+' come to '+matMoney(want)
+        +'. <a href="#" onclick="matUseComputedTotal();return false;" style="color:#1565C0;">Use '+matMoney(want)+'</a></div>';
+    }
   }
+  if(el) el.innerHTML = sum>0
+    ? ('Items total: '+matMoney(sum)+(adv>0?' − advance '+matMoney(adv)+' = <span style="color:#1565C0;">this entry '+matMoney(want)+'</span>':'')+mismatch)
+    : '';
   var missing=MAT.lines.filter(function(L){ return matNum(L.amount)>0 && !L.itemId; }).length;
-  if(warn) warn.textContent = missing ? missing+' line(s) have an amount but no item selected \u2014 those will not reach stock.' : '';
+  if(warn) warn.textContent = missing ? missing+' line(s) have an amount but no item selected — those will not reach stock.' : '';
+  matRenderAdv();
+}
+
+/* v40: on save — mark the ticked advances as used by this bill (and free
+   any that were un-ticked), so the same advance can never be counted twice. */
+function matLinkAdvances(obj){
+  var want={}; (obj.advLinks||[]).forEach(function(a){ want[a.id]=1; });
+  var moved=0;
+  S.expenses.forEach(function(e){
+    if(e.id===obj.id) return;
+    var ch=false;
+    if(want[e.id]){
+      var tag='[Advance for bill '+obj.date+' '+obj.party+' '+matMoney(obj.goods||obj.total)+']';
+      if(e.advFor!==obj.id || (e.desc||'').indexOf(tag)<0){ e.advFor=obj.id; e.desc=advTag(e.desc,tag); ch=true; }
+      if(obj.category && e.category!==obj.category){ e.category=obj.category; if(obj.item) e.item=obj.item; ch=true; moved++; }
+    } else if(e.advFor===obj.id){
+      delete e.advFor; e.desc=advStrip(e.desc); ch=true;
+    }
+    if(ch){ e.updatedAt=Date.now(); if(S.url) syncToSheet(e); }
+  });
+  saveExpenses();
+  return moved;
+}
+function matUnlinkBill(id){
+  S.expenses.forEach(function(e){
+    if(e.advFor===id){ delete e.advFor; e.desc=advStrip(e.desc); e.updatedAt=Date.now(); if(S.url) syncToSheet(e); }
+  });
 }
 
 /* ── after saving the expense ────────────────────────────────────────── */
@@ -3863,7 +4271,12 @@ function matAfterSave(obj,wasEdit){
   }
   if(!ptUrl()){ showToast('Saved locally \u2014 set the Tracker URL in Settings to update stock'); return; }
 
-  var A=expAmounts();
+  var A0=expAmounts();
+  /* v40: advances ticked on this bill are part of what the goods cost and of
+     what the supplier has been paid. */
+  var advSum=(obj.advLinks||[]).reduce(function(t,a){ return t+matNum(a.amt); },0);
+  var nr=A0.gross>0?A0.net/A0.gross:1;
+  var A={gross:Math.round((A0.gross+advSum)*100)/100, gst:A0.gst, net:Math.round((A0.net+advSum*nr)*100)/100};
   /* Allocate the net across the lines in proportion to their amounts, so the
      line values always add back to the bill's net. Doing it per line with its
      own rounding is how a bill ends up a rupee out from its own contents. */
@@ -3873,7 +4286,7 @@ function matAfterSave(obj,wasEdit){
   var payload={
     id:obj.id, date:obj.date, party:obj.party, category:obj.category,
     gross:A.gross, gst:A.gst, net:A.net,
-    paidAtEntry:matNum(obj.paid), notes:obj.desc||obj.ref||'',
+    paidAtEntry:Math.round((matNum(obj.paid)+advSum)*100)/100, notes:obj.desc||obj.ref||'',
     lines:lines.map(function(L,i){
       var m=matFind(L.itemId)||{};
       var per=matNum(m.perPack)||1;
